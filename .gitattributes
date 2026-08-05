@@ -1,0 +1,26 @@
+# Normalize line endings so a repo authored on Windows still works in Linux CI
+# and inside Docker. Without this, a CRLF shell script fails on Linux with a
+# confusing "bad interpreter" error, and every file shows as fully rewritten in
+# diffs between contributors.
+
+* text=auto eol=lf
+
+# Windows-only files keep CRLF.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Binaries must never be line-ending converted.
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+*.parquet binary
+*.pkl  binary
+*.joblib binary
+*.pt   binary
+*.onnx binary
+
+# Notebooks and lockfiles are noisy in diffs; mark them so GitHub's language
+# stats and diff views behave sensibly.
+*.ipynb linguist-documentation
+uv.lock linguist-generated

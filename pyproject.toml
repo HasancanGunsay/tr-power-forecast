@@ -1,0 +1,65 @@
+[project]
+name = "powerforecast"
+version = "0.1.0"
+description = "Day-ahead electricity load and price forecasting for the Turkish and European markets"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Hasancan Günsay", email = "hasancangunsay16@gmail.com" }]
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/powerforecast"]
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter (replaces flake8, isort, black, and more)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes — real bugs: unused vars, undefined names
+    "I",    # isort — import ordering
+    "UP",   # pyupgrade — modern Python idioms
+    "B",    # bugbear — likely-bug patterns (mutable default args, etc.)
+    "SIM",  # simplify — needlessly complex code
+    "PTH",  # prefer pathlib over os.path
+    "RUF",  # ruff-specific rules
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=src/powerforecast --cov-report=term-missing"
+
+# ---------------------------------------------------------------------------
+# mypy — static type checking, intentionally lenient at first
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true

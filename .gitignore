@@ -1,0 +1,57 @@
+# --- Data & models -----------------------------------------------------
+# Datasets and model binaries never go into git. They bloat the repo forever
+# and git cannot diff them anyway. Track how to *regenerate* them instead.
+#
+# Note the `dir/**` + re-include pattern below. Writing a plain `data/` would
+# ignore the directory itself, and git then refuses to descend into it, so any
+# later `!data/.gitkeep` exception is silently dead. Ignoring the *contents*
+# (`data/**`) while re-including directories (`!data/**/`) keeps the exceptions
+# reachable.
+data/**
+!data/**/
+!data/**/.gitkeep
+
+models/**
+!models/**/
+!models/**/.gitkeep
+
+reports/figures/**
+!reports/figures/**/
+!reports/figures/**/.gitkeep
+
+*.parquet
+*.csv
+*.pkl
+*.joblib
+*.pt
+*.onnx
+
+# --- Secrets -----------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.key
+credentials.json
+
+# --- Python ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# --- Tooling caches ----------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- Editors / OS ------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
