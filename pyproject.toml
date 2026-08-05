@@ -8,6 +8,8 @@ license = { text = "MIT" }
 authors = [{ name = "Hasancan Günsay", email = "hasancangunsay16@gmail.com" }]
 dependencies = [
     "httpx>=0.28.1",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.0",
     "pydantic-settings>=2.14.2",
 ]
 
@@ -19,6 +21,7 @@ dev = [
     "mypy>=1.13",
     "pre-commit>=4.0",
     "respx>=0.23.1",
+    "pandas-stubs>=3.0.5.260730",
 ]
 
 [build-system]

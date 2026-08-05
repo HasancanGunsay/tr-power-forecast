@@ -20,6 +20,7 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -27,6 +28,10 @@ import httpx
 
 TGT_URL = "https://giris.epias.com.tr/cas/v1/tickets"
 BASE_URL = "https://seffaflik.epias.com.tr/electricity-service"
+
+# Turkish market time. Türkiye has used a fixed UTC+03:00 since 2016 with no
+# daylight saving, which is why request timestamps can carry a literal offset.
+ISTANBUL_OFFSET = "+03:00"
 
 TGT_LIFETIME = timedelta(hours=2)
 TGT_IDLE_TIMEOUT = timedelta(minutes=45)
@@ -144,6 +149,58 @@ class EpiasAuth:
         # Never interpolate the password: reprs end up in logs and tracebacks.
         state = "authenticated" if self._ticket else "unauthenticated"
         return f"EpiasAuth(username={self._username!r}, state={state!r})"
+
+
+# --------------------------------------------------------------------------- #
+# Series catalogue
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class SeriesSpec:
+    """One time series available from the platform.
+
+    Endpoints are not uniform — the value field is named differently on each, and
+    responses wrap their summary under `statistics` on one endpoint and
+    `statistic` on another. Describing each series in data rather than writing a
+    function per endpoint keeps that irregularity in one readable place.
+    """
+
+    name: str
+    path: str
+    value_field: str
+    column: str
+    unit: str
+
+
+CONSUMPTION = SeriesSpec(
+    name="consumption",
+    path="/v1/consumption/data/realtime-consumption",
+    value_field="consumption",
+    column="consumption_mwh",
+    unit="MWh",
+)
+
+DAY_AHEAD_PRICE = SeriesSpec(
+    name="day_ahead_price",
+    path="/v1/markets/dam/data/mcp",
+    value_field="price",
+    column="price_try_mwh",
+    unit="TRY/MWh",
+)
+
+# The system operator's own published forecast. Worth collecting as a benchmark:
+# beating a seasonal-naive baseline says little, while comparing against the
+# forecast the market actually runs on is a real test.
+LOAD_PLAN = SeriesSpec(
+    name="load_plan",
+    path="/v1/consumption/data/load-estimation-plan",
+    value_field="lep",
+    column="load_plan_mwh",
+    unit="MWh",
+)
+
+ALL_SERIES = (CONSUMPTION, DAY_AHEAD_PRICE, LOAD_PLAN)
 
 
 # --------------------------------------------------------------------------- #
