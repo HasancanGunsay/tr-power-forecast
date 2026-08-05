@@ -216,7 +216,15 @@ TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
 
 MAX_ATTEMPTS = 4
 BACKOFF_BASE_SECONDS = 1.0
-MIN_REQUEST_INTERVAL = 0.2  # ~5 requests/second, comfortably under the platform limit
+MIN_REQUEST_INTERVAL = 0.2
+
+# Observed in practice: the platform's quota is cumulative across endpoints, not
+# per-endpoint. A long backfill can run for dozens of requests and then hit 429
+# once the window fills. Backing off a single request is not enough — the whole
+# loop has to slow down, and stay slow, because the next request will meet the
+# same exhausted quota.
+RATE_LIMIT_GROWTH = 2.0
+MAX_REQUEST_INTERVAL = 8.0
 
 
 class EpiasRequestError(RuntimeError):
@@ -314,6 +322,8 @@ class EpiasClient:
 
             if response.status_code in TRANSIENT_STATUS:
                 last_error = f"HTTP {response.status_code}"
+                if response.status_code == 429:
+                    self._slow_down()
                 if attempt == self._max_attempts:
                     break
                 self._sleep(self._retry_delay(response, attempt))
@@ -338,6 +348,21 @@ class EpiasClient:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+    @property
+    def interval(self) -> float:
+        """Current spacing between requests. Grows after throttling."""
+        return self._min_interval
+
+    def _slow_down(self) -> None:
+        """Widen the gap between all future requests, not just this retry.
+
+        The quota is shared, so once it is exhausted the next request meets the
+        same wall. Retrying one request harder does not help; the loop has to
+        proceed more slowly from here on. The interval is not lowered again —
+        recovering it would just walk back into the limit.
+        """
+        self._min_interval = min(self._min_interval * RATE_LIMIT_GROWTH, MAX_REQUEST_INTERVAL)
 
     def _wait_for_rate_limit(self) -> None:
         """Keep a minimum gap between requests.

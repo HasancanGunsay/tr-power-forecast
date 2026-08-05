@@ -157,6 +157,15 @@ def _sample(index: pd.Index, limit: int) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def fetch_chunk(client: EpiasClient, spec: SeriesSpec, start: date, end: date) -> pd.DataFrame:
+    """Fetch a single inclusive date range in one request."""
+    body = client.post(
+        spec.path,
+        {"startDate": _as_request_bound(start), "endDate": _as_request_bound(end)},
+    )
+    return to_frame(body.get("items", []), spec)
+
+
 def fetch_series(
     client: EpiasClient,
     spec: SeriesSpec,
@@ -167,16 +176,7 @@ def fetch_series(
 ) -> pd.DataFrame:
     """Fetch one series over an inclusive date range, month by month."""
     frames = [
-        to_frame(
-            client.post(
-                spec.path,
-                {
-                    "startDate": _as_request_bound(chunk_start),
-                    "endDate": _as_request_bound(chunk_end),
-                },
-            ).get("items", []),
-            spec,
-        )
+        fetch_chunk(client, spec, chunk_start, chunk_end)
         for chunk_start, chunk_end in month_chunks(start, end)
     ]
 
@@ -198,9 +198,20 @@ def _series_dir(spec: SeriesSpec, root: Path | None) -> Path:
 def write_raw(frame: pd.DataFrame, spec: SeriesSpec, *, root: Path | None = None) -> list[Path]:
     """Write a series to `<root>/<series>/YYYY-MM.parquet`, one file per month.
 
-    Existing months are replaced rather than appended to, so re-running a fetch
-    is idempotent — a pipeline that duplicates rows on re-run is worse than one
-    that fails.
+    An existing month is **merged with**, not replaced by, the incoming rows: on
+    a conflicting timestamp the new value wins, and rows the caller did not
+    supply are kept.
+
+    Replacing outright would be simpler, and it is correct when a whole series
+    is written in one call. It is silently destructive when months arrive one at
+    a time: storage partitions on UTC while requests are made in Istanbul local
+    time, so a request for January also returns the first hours of the UTC
+    February file, and the February request returns the last hours of the UTC
+    January one. Under replace semantics, each write would truncate its
+    neighbour's file to the handful of overlapping hours.
+
+    Merging keeps re-runs idempotent, which is the property that mattered in the
+    first place.
     """
     directory = _series_dir(spec, root)
     directory.mkdir(parents=True, exist_ok=True)
@@ -212,9 +223,23 @@ def write_raw(frame: pd.DataFrame, spec: SeriesSpec, *, root: Path | None = None
     months = pd.DatetimeIndex(frame.index).strftime("%Y-%m")
     for period, group in frame.groupby(months):
         path = directory / f"{period}.parquet"
+
+        if path.exists():
+            existing = pd.read_parquet(path)
+            # `keep="last"` puts the incoming rows after the stored ones, so a
+            # re-fetch overwrites a revised value rather than preserving a stale one.
+            group = pd.concat([existing, group])
+            group = group[~group.index.duplicated(keep="last")].sort_index()
+
         group.to_parquet(path, index=True)
         written.append(path)
     return written
+
+
+def stored_months(spec: SeriesSpec, *, root: Path | None = None) -> set[str]:
+    """Return the `YYYY-MM` labels already on disk for a series."""
+    directory = _series_dir(spec, root)
+    return {path.stem for path in directory.glob("*.parquet")}
 
 
 def read_raw(spec: SeriesSpec, *, root: Path | None = None) -> pd.DataFrame:

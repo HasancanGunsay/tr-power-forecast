@@ -175,13 +175,43 @@ def test_raw_data_is_partitioned_by_month(tmp_path) -> None:
     assert written == ["2026-01.parquet", "2026-02.parquet"]
 
 
-def test_rewriting_a_month_replaces_it_rather_than_appending(tmp_path) -> None:
+def test_rewriting_the_same_data_is_idempotent(tmp_path) -> None:
     first = to_frame(_items("2026-08-01 00:00", 24), CONSUMPTION)
     write_raw(first, CONSUMPTION, root=tmp_path)
     write_raw(first, CONSUMPTION, root=tmp_path)
 
     restored = read_raw(CONSUMPTION, root=tmp_path)
     assert len(restored) == 24
+
+
+def test_a_partial_write_does_not_truncate_the_month(tmp_path) -> None:
+    # This is the shape of a real bug: chunks are requested in Istanbul local
+    # time but stored per UTC month, so consecutive chunks each land a few hours
+    # in the neighbour's file. Replacing the file outright would leave only
+    # those few hours behind.
+    full_month = to_frame(_items("2026-06-01 03:00", 700), CONSUMPTION)
+    write_raw(full_month, CONSUMPTION, root=tmp_path)
+
+    spillover = to_frame(_items("2026-06-30 22:00", 5), CONSUMPTION)
+    write_raw(spillover, CONSUMPTION, root=tmp_path)
+
+    restored = read_raw(CONSUMPTION, root=tmp_path)
+    assert len(restored) == 705
+    assert restored.index.is_monotonic_increasing
+
+
+def test_refetched_values_win_over_stored_ones(tmp_path) -> None:
+    original = to_frame(_items("2026-08-01 00:00", 3), CONSUMPTION)
+    write_raw(original, CONSUMPTION, root=tmp_path)
+
+    revised = original.copy()
+    revised.iloc[1, 0] = 999.0
+    write_raw(revised, CONSUMPTION, root=tmp_path)
+
+    # The platform revises published figures; a stale value must not survive.
+    restored = read_raw(CONSUMPTION, root=tmp_path)
+    assert restored.iloc[1, 0] == 999.0
+    assert len(restored) == 3
 
 
 def test_reading_an_absent_series_gives_an_empty_frame(tmp_path) -> None:

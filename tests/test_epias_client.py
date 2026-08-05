@@ -221,6 +221,59 @@ def test_rate_limit_spaces_out_requests(auth: StubAuth, fake_time: FakeTime) -> 
 
 
 @respx.mock
+def test_429_widens_the_interval_for_later_requests(auth: StubAuth, fake_time: FakeTime) -> None:
+    client = EpiasClient(
+        auth,  # type: ignore[arg-type]
+        base_url=BASE_URL,
+        min_interval=1.0,
+        monotonic=fake_time.monotonic,
+        sleep=fake_time.sleep,
+        jitter=lambda delay: delay,
+    )
+    respx.post(URL).mock(
+        side_effect=[httpx.Response(429), httpx.Response(200, json={})],
+    )
+
+    client.post(PATH, PAYLOAD)
+
+    # The quota is shared across endpoints, so once it is exhausted the next
+    # request meets the same wall. Retrying one request harder does not help;
+    # the whole loop has to proceed more slowly from here on.
+    assert client.interval == 2.0
+
+
+@respx.mock
+def test_interval_growth_is_capped(auth: StubAuth, fake_time: FakeTime) -> None:
+    client = EpiasClient(
+        auth,  # type: ignore[arg-type]
+        base_url=BASE_URL,
+        min_interval=6.0,
+        max_attempts=3,
+        monotonic=fake_time.monotonic,
+        sleep=fake_time.sleep,
+        jitter=lambda delay: delay,
+    )
+    respx.post(URL).mock(return_value=httpx.Response(429))
+
+    with pytest.raises(EpiasRequestError):
+        client.post(PATH, PAYLOAD)
+
+    # Unbounded growth would eventually stall the pipeline entirely.
+    assert client.interval == 8.0
+
+
+@respx.mock
+def test_successful_requests_do_not_widen_the_interval(
+    client: EpiasClient, fake_time: FakeTime
+) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, json={}))
+
+    client.post(PATH, PAYLOAD)
+
+    assert client.interval == 0.0
+
+
+@respx.mock
 def test_non_json_body_is_reported_clearly(client: EpiasClient) -> None:
     respx.post(URL).mock(return_value=httpx.Response(200, text="<html>maintenance</html>"))
 

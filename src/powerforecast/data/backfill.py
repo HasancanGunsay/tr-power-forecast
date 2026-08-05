@@ -4,14 +4,18 @@ Run as:
 
     uv run python -m powerforecast.data.backfill --start 2021-01-01
 
-Deliberately **does not** fail on a data-quality problem. `data/raw/` holds what
-the API actually returned, gaps included; discovering later that a month is short
-is far better than having a backfill abort halfway and leave a partial dataset
-that looks complete. Problems are reported at the end and dealt with explicitly
-in the processing step, where the choice — interpolate, flag, or drop — is a
-modelling decision rather than a download detail.
+Each month is written as soon as it arrives, so an interrupted run keeps
+everything it already fetched. Re-running skips months that are already on disk
+unless `--refresh` is given — the platform's quota is cumulative across
+endpoints, so re-downloading data we already hold is not merely wasteful, it is
+what pushes the next request into a 429.
 
-Re-running is safe: months are rewritten in place, never appended to.
+Deliberately **does not** abort on a data-quality problem. `data/raw/` holds what
+the API actually returned, gaps included; discovering later that a month is short
+is far better than a backfill that stops halfway and leaves a partial dataset
+looking complete. Problems are reported at the end and resolved in the processing
+step, where the choice — interpolate, flag, or drop — is a modelling decision
+rather than a download detail.
 """
 
 from __future__ import annotations
@@ -20,26 +24,36 @@ import argparse
 import sys
 from datetime import date, timedelta
 
+import pandas as pd
+
 from powerforecast.config import get_settings
 from powerforecast.data.epias import ALL_SERIES, EpiasAuth, EpiasClient, SeriesSpec
 from powerforecast.data.ingest import (
     DataQualityError,
-    fetch_series,
+    fetch_chunk,
+    month_chunks,
+    read_raw,
+    stored_months,
     validate_hourly,
     write_raw,
 )
 
 DEFAULT_START = date(2021, 1, 1)
 
+# Bulk downloads get a wider default gap than interactive use. Being throttled
+# mid-backfill costs far more than the extra seconds spent avoiding it.
+BACKFILL_INTERVAL = 1.0
+BACKFILL_ATTEMPTS = 6
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Backfill EPİAŞ series into data/raw/.")
     parser.add_argument("--start", type=date.fromisoformat, default=DEFAULT_START)
     parser.add_argument(
         "--end",
         type=date.fromisoformat,
         # Yesterday: today's series is still being published and would land as a
-        # short final day that then never gets refilled.
+        # short final day that never gets refilled.
         default=date.today() - timedelta(days=1),
     )
     parser.add_argument(
@@ -47,6 +61,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="*",
         choices=[spec.name for spec in ALL_SERIES],
         help="Series to download (default: all).",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-download months that are already stored.",
     )
     return parser.parse_args(argv)
 
@@ -57,6 +76,50 @@ def selected_series(names: list[str] | None) -> tuple[SeriesSpec, ...]:
     return tuple(spec for spec in ALL_SERIES if spec.name in names)
 
 
+def _months_covered(start: date, end: date) -> set[str]:
+    """UTC month labels a local date range can touch.
+
+    Storage partitions on UTC, and Istanbul is UTC+3, so a range starting on the
+    1st of a month reaches back into the previous UTC month. Treating a month as
+    already downloaded therefore requires *both* labels to be present.
+    """
+    return {
+        stamp.strftime("%Y-%m")
+        for stamp in pd.date_range(
+            pd.Timestamp(start, tz="Europe/Istanbul"),
+            pd.Timestamp(end, tz="Europe/Istanbul") + pd.Timedelta(days=1),
+            freq="h",
+        ).tz_convert("UTC")
+    }
+
+
+def backfill_series(
+    client: EpiasClient,
+    spec: SeriesSpec,
+    start: date,
+    end: date,
+    *,
+    refresh: bool,
+) -> pd.DataFrame:
+    """Download and store one series month by month, returning what was fetched."""
+    on_disk = set() if refresh else stored_months(spec)
+    fetched: list[pd.DataFrame] = []
+
+    for chunk_start, chunk_end in month_chunks(start, end):
+        if _months_covered(chunk_start, chunk_end) <= on_disk:
+            continue
+
+        frame = fetch_chunk(client, spec, chunk_start, chunk_end)
+        write_raw(frame, spec)
+        fetched.append(frame)
+        print(
+            f"  {chunk_start:%Y-%m}  {len(frame):>4} rows  (interval {client.interval:.1f}s)",
+            flush=True,
+        )
+
+    return pd.concat(fetched).sort_index() if fetched else pd.DataFrame()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = get_settings()
@@ -65,17 +128,18 @@ def main(argv: list[str] | None = None) -> int:
     auth = EpiasAuth(username=username, password=password)
     problems: list[str] = []
 
-    with EpiasClient(auth) as client:
+    with EpiasClient(
+        auth, min_interval=BACKFILL_INTERVAL, max_attempts=BACKFILL_ATTEMPTS
+    ) as client:
         for spec in selected_series(args.series):
             print(f"{spec.name}: {args.start} .. {args.end}", flush=True)
 
-            frame = fetch_series(client, spec, args.start, args.end, validate=False)
-            files = write_raw(frame, spec)
+            backfill_series(client, spec, args.start, args.end, refresh=args.refresh)
 
-            print(f"  {len(frame):,} rows -> {len(files)} monthly file(s)", flush=True)
-
+            # Validate everything on disk, not just what this run fetched, so a
+            # resumed run still checks the series as a whole.
             try:
-                validate_hourly(frame, name=spec.name)
+                validate_hourly(read_raw(spec), name=spec.name)
             except DataQualityError as exc:
                 problems.append(str(exc))
                 print(f"  quality: {exc}", flush=True)
