@@ -77,6 +77,11 @@ cp .env.example .env      # fill in credentials
 Tests that need live credentials are marked and skipped by default, so the suite runs
 in CI without secrets.
 
+## Design decisions
+
+Non-obvious choices are recorded in [`docs/decisions/`](docs/decisions/) — the
+problem, the choice, the alternatives that lost and why, and what each choice costs.
+
 ## Project structure
 
 ```
