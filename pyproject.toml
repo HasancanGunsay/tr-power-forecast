@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Hasancan Günsay", email = "hasancangunsay16@gmail.com" }]
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.14.2",
+]
 
 [dependency-groups]
 dev = [
@@ -15,6 +18,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "pre-commit>=4.0",
+    "respx>=0.23.1",
 ]
 
 [build-system]
@@ -42,6 +46,16 @@ select = [
     "SIM",  # simplify — needlessly complex code
     "PTH",  # prefer pathlib over os.path
     "RUF",  # ruff-specific rules
+]
+
+ignore = [
+    # Ambiguous-unicode rules. They exist to catch homoglyph attacks, but this
+    # project is about the Turkish electricity market and names like EPİAŞ,
+    # Şeffaflık and Türkiye are spelled correctly. Silencing them here beats
+    # littering the code with per-line noqa comments or misspelling proper nouns.
+    "RUF001",  # ambiguous character in a string
+    "RUF002",  # ambiguous character in a docstring
+    "RUF003",  # ambiguous character in a comment
 ]
 
 [tool.ruff.lint.per-file-ignores]
