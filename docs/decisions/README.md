@@ -18,6 +18,7 @@ history of a mistake is part of what makes the log useful.
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-epias-ticket-authentication.md) | Ticket handling for EPİAŞ authentication | Accepted |
+| [0002](0002-retry-and-rate-limiting.md) | Retry policy and rate limiting | Accepted |
 
 ## Template
 
