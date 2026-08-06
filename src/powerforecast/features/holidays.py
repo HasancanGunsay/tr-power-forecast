@@ -41,15 +41,20 @@ from hijridate import Gregorian, Hijri
 
 from powerforecast.features.availability import LOCAL_TZ
 
-# Fixed-date national holidays: (month, day, name).
-NATIONAL_HOLIDAYS: tuple[tuple[int, int, str], ...] = (
-    (1, 1, "yilbasi"),
-    (4, 23, "ulusal_egemenlik"),
-    (5, 1, "emek_ve_dayanisma"),
-    (5, 19, "genclik_ve_spor"),
-    (7, 15, "demokrasi"),
-    (8, 30, "zafer"),
-    (10, 29, "cumhuriyet"),
+# Fixed-date national holidays: (month, day, name, eve is a legal half day).
+#
+# Only Cumhuriyet Bayramı has a statutory half-day eve; the day before 23 April
+# or 30 August is ordinary working time. That distinction matters because error
+# diagnosis found 28 October among the worst days — the model had learned from
+# the many ordinary national eves that an eve looks normal.
+NATIONAL_HOLIDAYS: tuple[tuple[int, int, str, bool], ...] = (
+    (1, 1, "yilbasi", False),
+    (4, 23, "ulusal_egemenlik", False),
+    (5, 1, "emek_ve_dayanisma", False),
+    (5, 19, "genclik_ve_spor", False),
+    (7, 15, "demokrasi", False),
+    (8, 30, "zafer", False),
+    (10, 29, "cumhuriyet", True),
 )
 
 # Religious holidays, as (Hijri month, Hijri day of the first full day, length).
@@ -59,9 +64,17 @@ RAMAZAN = (10, 1, 3)
 KURBAN = (12, 10, 4)
 
 # Administrative extensions, which no calendar can compute.
-# Maps the first official day to the total number of non-working days granted.
-EXTENSIONS: dict[date, int] = {
-    date(2024, 4, 10): 6,  # extended from 8 April, giving a nine-day break
+#
+# Maps the *computed* first day of a holiday to the period actually granted, as
+# (first non-working day, total days). Both ends have to be overridable: an
+# extension usually starts earlier as well as ending later, and encoding only the
+# length shifts the whole window forward.
+#
+# The 2024 entry is what error diagnosis found. Encoded as length-only, the model
+# missed 8 April (demand had already collapsed, +4,187 MWh over-forecast) and
+# wrongly treated 15 April as a holiday (demand had recovered, −6,981 under).
+EXTENSIONS: dict[date, tuple[date, int]] = {
+    date(2024, 4, 10): (date(2024, 4, 8), 7),  # a continuous 8-14 April break
 }
 
 
@@ -73,6 +86,10 @@ class Holiday:
     first_day: date
     length_days: int
     religious: bool
+    # Whether the eve is a statutory half working day. True for every religious
+    # arife and for 28 October; false for the other national holidays, whose eves
+    # are ordinary working days.
+    half_day_eve: bool = False
 
     @property
     def eve(self) -> date:
@@ -106,16 +123,18 @@ def religious_holidays(year: int) -> list[Holiday]:
             except (ValueError, OverflowError):
                 continue
 
-            first_day = date(first.year, first.month, first.day)
-            if first_day.year != year:
+            computed = date(first.year, first.month, first.day)
+            if computed.year != year:
                 continue
 
+            first_day, length_days = EXTENSIONS.get(computed, (computed, length))
             holidays.append(
                 Holiday(
                     name=name,
                     first_day=first_day,
-                    length_days=EXTENSIONS.get(first_day, length),
+                    length_days=length_days,
                     religious=True,
+                    half_day_eve=True,
                 )
             )
 
@@ -124,8 +143,14 @@ def religious_holidays(year: int) -> list[Holiday]:
 
 def national_holidays(year: int) -> list[Holiday]:
     return [
-        Holiday(name=name, first_day=date(year, month, day), length_days=1, religious=False)
-        for month, day, name in NATIONAL_HOLIDAYS
+        Holiday(
+            name=name,
+            first_day=date(year, month, day),
+            length_days=1,
+            religious=False,
+            half_day_eve=half_day,
+        )
+        for month, day, name, half_day in NATIONAL_HOLIDAYS
     ]
 
 
@@ -143,7 +168,11 @@ def holiday_features(index: pd.DatetimeIndex, *, tz: str = LOCAL_TZ) -> pd.DataF
 
     Columns:
         `is_holiday`         an official non-working day
-        `is_eve`             the arife: a half working day, and the day travel starts
+        `is_eve`             the day before a holiday — where travel begins
+        `is_half_day`        a statutory half working day: every religious arife, plus
+                             28 October. Separate from `is_eve` because most national
+                             eves are ordinary working days, and conflating them taught
+                             the model that 28 October looked normal
         `is_religious`       inside a religious holiday, which behaves unlike a national one
         `holiday_position`   0 on the eve, 1..n through the holiday, -1 on ordinary days
         `days_to_holiday`    signed distance to the nearest holiday period, clipped to ±3
@@ -166,11 +195,14 @@ def holiday_features(index: pd.DatetimeIndex, *, tz: str = LOCAL_TZ) -> pd.DataF
 
     is_holiday: dict[date, bool] = {}
     is_eve: dict[date, bool] = {}
+    is_half_day: dict[date, bool] = {}
     is_religious: dict[date, bool] = {}
     position: dict[date, int] = {}
 
     for holiday in periods:
         is_eve[holiday.eve] = True
+        if holiday.half_day_eve:
+            is_half_day[holiday.eve] = True
         is_religious.setdefault(holiday.eve, holiday.religious)
         position.setdefault(holiday.eve, 0)
         for offset, day in enumerate(holiday.days(), start=1):
@@ -181,6 +213,7 @@ def holiday_features(index: pd.DatetimeIndex, *, tz: str = LOCAL_TZ) -> pd.DataF
     frame = pd.DataFrame(index=index)
     frame["is_holiday"] = dates.map(is_holiday).fillna(False).astype("int8")
     frame["is_eve"] = dates.map(is_eve).fillna(False).astype("int8")
+    frame["is_half_day"] = dates.map(is_half_day).fillna(False).astype("int8")
     frame["is_religious"] = dates.map(is_religious).fillna(False).astype("int8")
     frame["holiday_position"] = dates.map(position).fillna(-1).astype("float64")
     frame["days_to_holiday"] = _signed_distance(dates, periods)

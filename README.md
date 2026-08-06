@@ -21,12 +21,12 @@ every model refitted from scratch each fold, every forecast scored on the same h
 
 | Forecast | MAE (MWh) | RMSE (MWh) | MAPE | Bias |
 |---|---|---|---|---|
-| **LightGBM + weather + hourly bias** | **914** | **1,273** | **2.3%** | −1 |
-| LightGBM + weather + constant bias | 921 | 1,280 | 2.3% | −1 |
-| LightGBM + weather | 931 | 1,293 | 2.4% | −181 |
-| LightGBM | 977 | 1,335 | 2.5% | −108 |
-| Ridge + weather | 1,125 | 1,545 | 2.9% | −35 |
-| Ridge | 1,156 | 1,594 | 3.0% | −25 |
+| **LightGBM + weather + hourly bias** | **914** | **1,251** | **2.3%** | −1 |
+| LightGBM + weather + constant bias | 921 | 1,258 | 2.4% | −1 |
+| LightGBM + weather | 931 | 1,270 | 2.4% | −177 |
+| LightGBM | 977 | 1,320 | 2.5% | −103 |
+| Ridge + weather | 1,122 | 1,555 | 2.9% | −22 |
+| Ridge | 1,160 | 1,613 | 3.0% | −18 |
 | Published plan **+ hourly bias** | 1,213 | 1,744 | 3.1% | 0 |
 | Published plan **+ constant bias** | 1,221 | 1,753 | 3.1% | 0 |
 | Published plan (raw) | 1,260 | 1,786 | 3.2% | −338 |
@@ -91,16 +91,34 @@ error would mark the wrong days while looking correct. The converter's output is
 therefore checked against the days on which demand was observed to collapse — all six
 match, and that check is a test rather than a note.*
 
-### What still fails
+### What still fails, and why it is being left alone
 
-The remaining worst days are refinements of the same feature, not a new problem:
+Two refinements followed from the diagnosis and were made: the 2024 administrative
+extension now overrides its start date as well as its length (it ran from 8 April, not
+10), and statutory half-days are separated from ordinary holiday eves, since only the
+religious arife and 28 October are half working days by law.
 
-- **2024-04-15** (bias −6,981) — the model now over-applies the holiday. 2024's
-  administrative extension is encoded as six days from 10 April, but it actually ran
-  from **8 April**; the end is right and the start is wrong.
-- **2024-10-28** (+2,690) — the eve of Cumhuriyet Bayramı is a half working day by law,
-  which is not encoded.
-- **2024-06-17/18/19** — the later days of Kurban are still forecast too high.
+The result is worth reporting precisely because it is mixed:
+
+| | MAE | RMSE | worst 1% share |
+|---|---|---|---|
+| before refinement | 914 | 1,273 | 21.0% |
+| after | 914 | **1,250** | **17.5%** |
+
+RMSE and concentration improved; MAE did not move at all. Looking at the targeted days
+explains why — **one error was traded for another**. 15 April 2024 went from −6,981 to
+−1,192, the single largest error in the set. But 8 April flipped from +4,187 to −3,453:
+an administrative extension closes the public sector while industry partly works, so
+treating it as a full holiday makes the model expect a deeper collapse than happens.
+
+The remaining worst days are Kurban's later days, New Year, and the administrative
+extension. Each could be given its own feature, and each would be fitted on **two to
+five examples** — one, in the case of the extension. That is fitting noise, and this
+project has spent a lot of effort not doing that elsewhere.
+
+So the honest position is that holiday modelling has reached the limit of what five
+years of data supports. The next real gain is more history or a different target, not a
+sixth holiday column.
 
 *Aside:* the disjoint failure sets mean a combination of the two forecasts would beat
 either. That is a legitimate result but a different task — see the note on using the
