@@ -8,12 +8,59 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **Status: in progress.** Data pipeline and baselines are done; no learned model
-> exists yet. The table below is the bar those models have to clear.
+> **Status: in progress.** Pipeline, baselines and the first learned models are done.
+> The short version of the result: **the models do not meaningfully beat the published
+> forecast**, and most of the gap they do close can be closed without a model at all.
+
+![Learned models against the published plan](reports/figures/model_comparison.png)
+
+## Headline result
+
+Backtested over **22,320 out-of-sample hours** (31 monthly folds, Jan 2024 – Jul 2026),
+training re-fitted from scratch each fold:
+
+| Forecast | MAE (MWh) | RMSE (MWh) | MAPE |
+|---|---|---|---|
+| LightGBM | **1,188** | 1,788 | 3.1% |
+| Published plan **+ hourly bias** | 1,217 | **1,749** | 3.1% |
+| Published plan **+ constant bias** | 1,225 | 1,757 | 3.1% |
+| Ridge | 1,242 | 1,806 | 3.2% |
+| Published plan (raw) | 1,270 | 1,795 | 3.2% |
+| Seasonal naive, 168h | 2,085 | 3,342 | 5.5% |
+| Seasonal naive, 48h | 3,148 | 4,418 | 8.2% |
+
+Read the middle rows first. The published plan runs **364 MWh low** on average; adding
+that single number back is a one-line change with no model, no training and no features.
+It closes 45 MWh of LightGBM's 82 MWh advantage. Correcting per delivery hour instead
+closes 53 of it.
+
+So LightGBM's contribution *beyond arithmetic anyone could do* is about **29 MWh — 2.3%
+of the plan's error**. And on RMSE it does not win at all: the hourly-bias correction is
+better. Ridge is beaten by both corrections on both metrics.
+
+**The honest conclusion is that these models are not yet competitive with the published
+forecast.** They are better than every naive baseline by a wide margin, which says the
+pipeline works; they are not better than a professional forecast in any way that would
+survive scrutiny.
+
+### Why, and what follows from it
+
+The plan almost certainly uses **weather**, and this project does not yet. Temperature
+drives cooling and heating demand, and no amount of calendar structure or lagged
+consumption recovers information about tomorrow's weather that was never in the
+features. The MAE/RMSE split is consistent with this: the models are competitive on
+ordinary hours and lose on the extreme ones, which is where weather dominates.
+
+Adding temperature forecasts is therefore the next step, and the reason for it is a
+measurement rather than an assumption.
+
+*(The bias corrections above estimate their offset over the whole evaluation period, so
+they are optimistic — a live system would have to estimate it from history. That is
+deliberate: they exist to be hard to beat, not to be deployed.)*
+
+## Baselines
 
 ![Baselines against the published plan](reports/figures/baselines.png)
-
-## Results so far
 
 Consumption, one delivery day ahead. Every forecast is scored on the **24,408 hours
 all four can cover**, because scoring each on its own coverage rewards the method with
