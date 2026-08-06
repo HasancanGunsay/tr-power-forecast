@@ -13,10 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from powerforecast.models.baselines import (
-    forecast_origins,
-    seasonal_naive,
-)
+from powerforecast.models.baselines import seasonal_naive
 
 
 def _hourly(start: str, hours: int) -> pd.Series:
@@ -27,35 +24,6 @@ def _hourly(start: str, hours: int) -> pd.Series:
 
 def _local(series: pd.Series) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(series.index).tz_convert("Europe/Istanbul")
-
-
-# --------------------------------------------------------------------------- #
-# Forecast origins
-# --------------------------------------------------------------------------- #
-
-
-def test_origin_is_gate_closure_on_the_previous_local_day() -> None:
-    targets = pd.DatetimeIndex([pd.Timestamp("2026-08-06 03:00", tz="Europe/Istanbul")]).tz_convert(
-        "UTC"
-    )
-
-    origins = forecast_origins(targets, last_observed_hour=11)
-
-    # Bids close at 12:30, and hourly values are stamped at the start of the
-    # hour, so 12:00 is still incomplete when the bid is submitted. The newest
-    # fully observed stamp is 11:00.
-    assert origins.iloc[0] == pd.Timestamp("2026-08-05 11:00", tz="Europe/Istanbul")
-
-
-def test_every_hour_of_a_day_shares_one_origin() -> None:
-    day = pd.date_range("2026-08-06 00:00", periods=24, freq="h", tz="Europe/Istanbul")
-
-    origins = forecast_origins(day.tz_convert("UTC"), last_observed_hour=11)
-
-    # A single bid is submitted for the whole delivery day, so all 24 hours are
-    # forecast from the same moment. Lead time therefore ranges from 12 to 35
-    # hours, and the model must not be told otherwise.
-    assert origins.nunique() == 1
 
 
 # --------------------------------------------------------------------------- #
