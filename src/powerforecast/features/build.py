@@ -18,6 +18,7 @@ import pandas as pd
 
 from powerforecast.features.availability import LAST_OBSERVED_HOUR, LOCAL_TZ
 from powerforecast.features.calendar import calendar_features
+from powerforecast.features.holidays import holiday_features
 from powerforecast.features.lags import origin_lag, origin_rolling, target_lag
 
 # Target-relative lags, all at least 36 hours so they are observable for every
@@ -44,6 +45,7 @@ class FeatureSpec:
     origin_windows: tuple[int, ...] = DEFAULT_ORIGIN_WINDOWS
     origin_offsets: tuple[int, ...] = (0, 24)
     include_weather: bool = True
+    include_holidays: bool = True
     include_load_plan: bool = False
     last_observed_hour: int = LAST_OBSERVED_HOUR
     tz: str = LOCAL_TZ
@@ -126,6 +128,14 @@ def build_design_matrix(
         columns.append(panel[name])
 
     features = calendar_features(index, tz=spec.tz).join(pd.concat(columns, axis=1))
+
+    if spec.include_holidays:
+        # Also safe by construction: a calendar for next year is known this year.
+        # Error diagnosis showed these are the model's most expensive blind spot —
+        # every one of its worst delivery days was a holiday, with a bias of
+        # +7,700 MWh from forecasting an ordinary day while demand collapsed.
+        features = features.join(holiday_features(index, tz=spec.tz))
+
     return features, target
 
 

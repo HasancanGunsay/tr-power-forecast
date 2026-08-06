@@ -8,10 +8,9 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **Status: in progress.** Pipeline, baselines, weather and the first learned models are
-> done. Short version: the best model beats the published forecast by **7.5% on MAE**
-> against the strongest baseline available — and is level with it on RMSE, so the gain
-> is in ordinary hours, not extreme ones.
+> **Status: in progress.** Short version: the best model beats the published forecast by
+> **27% on MAE** and **29% on RMSE** — and still wins by 25% and 27% against that
+> forecast with its systematic bias already corrected, which is the harder comparison.
 
 ![Learned models against the published plan](reports/figures/model_comparison.png)
 
@@ -22,14 +21,14 @@ every model refitted from scratch each fold, every forecast scored on the same h
 
 | Forecast | MAE (MWh) | RMSE (MWh) | MAPE | Bias |
 |---|---|---|---|---|
-| **LightGBM + weather + hourly bias** | **1,122** | 1,748 | **2.9%** | −1 |
-| LightGBM + weather + constant bias | 1,129 | 1,752 | 2.9% | −1 |
-| LightGBM + weather | 1,155 | 1,766 | 3.0% | −223 |
-| LightGBM | 1,186 | 1,773 | 3.0% | −125 |
-| Ridge + weather | 1,209 | 1,757 | 3.2% | +23 |
-| Published plan **+ hourly bias** | 1,213 | **1,744** | 3.1% | 0 |
+| **LightGBM + weather + hourly bias** | **914** | **1,273** | **2.3%** | −1 |
+| LightGBM + weather + constant bias | 921 | 1,280 | 2.3% | −1 |
+| LightGBM + weather | 931 | 1,293 | 2.4% | −181 |
+| LightGBM | 977 | 1,335 | 2.5% | −108 |
+| Ridge + weather | 1,125 | 1,545 | 2.9% | −35 |
+| Ridge | 1,156 | 1,594 | 3.0% | −25 |
+| Published plan **+ hourly bias** | 1,213 | 1,744 | 3.1% | 0 |
 | Published plan **+ constant bias** | 1,221 | 1,753 | 3.1% | 0 |
-| Ridge | 1,229 | 1,782 | 3.2% | +1 |
 | Published plan (raw) | 1,260 | 1,786 | 3.2% | −338 |
 | Seasonal naive, 168h | 2,077 | 3,340 | 5.5% | −53 |
 | Seasonal naive, 48h | 3,142 | 4,409 | 8.1% | −11 |
@@ -45,35 +44,25 @@ The same correction is applied to our own best model, for the same reason in rev
 Correcting only the competitor would rig the comparison in the opposite direction to the
 usual one, and our model's bias was larger than the corrected plan's.
 
-### What the two metrics say
+### How the holiday feature was found, and what it was worth
 
-**On MAE the model wins clearly**: 1,122 against 1,213, a **7.5% improvement over the
-strongest baseline** and 11% over the raw plan.
+The interesting part of this result is not the number — it is that the number came from
+a diagnosis rather than from trying models until one worked.
 
-**On RMSE it does not**: 1,748 against 1,744 — a 0.2% difference, which is noise. Since
-RMSE weights large errors more heavily, the remaining gap lives in the tail. Chasing
-that down turned out to be the most informative thing in the project so far.
+An earlier version won on MAE and was **exactly level on RMSE** (1,748 against 1,744).
+Since RMSE weights large misses, that combination said the remaining gap lived in the
+tail, so the tail was where the investigation went.
 
-### The tail: two forecasts that fail on different days
+**The error was concentrated.** The worst 1% of hours carried 29.5% of all squared
+error. RMSE was being decided by a few hundred hours, and improving the average hour
+could not have moved it.
 
-Error is heavily concentrated — the worst **1% of hours carry 29.5%** of all squared
-error, and the worst 5% carry 57.7%. So RMSE is decided by a few hundred hours, and
-improving the average hour cannot move it.
+**The two forecasts failed on different days.** Scoring each on the *other's* hardest
+hours produced near mirror images — the published plan was 3.6× worse on the model's
+easy-but-plan-hard hours, and the model was 4.9× worse on its own. Two separate
+weaknesses, not one shared one.
 
-Scoring each forecast on the *other's* hardest hours shows they are not competing for
-the same failures at all:
-
-| Hardest 1% of hours, defined by | This model's MAE | Corrected plan's MAE |
-|---|---|---|
-| the corrected plan | **2,186** | 7,926 |
-| this model | 9,279 | **1,881** |
-
-Near mirror images. The tie on RMSE is not "the model is uniformly worse in the tail" —
-each forecast has its own catastrophic set, of similar size, and they barely overlap.
-
-### The model's catastrophic days are religious holidays
-
-Ranking delivery days by error and reading them chronologically:
+**The model's catastrophic days, read chronologically, were these:**
 
 ```
 2024-04-08/09/10     2025-03-29/30/31     2026-03-19/20/23
@@ -81,18 +70,37 @@ Ranking delivery days by error and reading them chronologically:
 ```
 
 Two clusters, each sliding about **11 days earlier every year**, roughly 70 days apart —
-the signature of the Hijri calendar. These are Ramazan and Kurban Bayramı. The remaining
-worst days are fixed-date national holidays (1 January, 23 April, 29 October).
+the signature of the Hijri calendar. Ramazan and Kurban Bayramı, plus fixed-date national
+holidays. Bias on those days was **+7,702 MWh**: an ordinary day forecast while industry
+shut and demand collapsed.
 
-On those days the model's bias is **+7,702 MWh**: it forecasts an ordinary day while
-demand collapses, because industry shuts and cities empty. The published plan handles
-them, which is most of why it wins the tail.
+[`features/holidays.py`](src/powerforecast/features/holidays.py) closes that gap, and
+emits more than a single flag because the diagnosis showed demand falling *before* the
+eve and still depressed *after* the last day — the eve, the position within a multi-day
+holiday, and a signed ±3-day distance all carry signal.
 
-[`features/calendar.py`](src/powerforecast/features/calendar.py) deliberately omits
-holidays, on the grounds that the religious ones cannot be derived from a timestamp and
-a fixed-date flag would mark the wrong days while looking correct. That call is now
-confirmed by measurement, and its cost is quantified. Adding a proper Turkish holiday
-calendar is the next step, and it is the highest-value one available.
+| | MAE | RMSE | worst 1% share of squared error |
+|---|---|---|---|
+| before holiday features | 1,122 | 1,748 | 29.5% |
+| after | **914** | **1,273** | **21.0%** |
+
+RMSE fell 27%, which is what aiming at the tail is supposed to look like.
+
+*Computed Hijri dates can differ from the official Turkish ones by a day, and a day's
+error would mark the wrong days while looking correct. The converter's output is
+therefore checked against the days on which demand was observed to collapse — all six
+match, and that check is a test rather than a note.*
+
+### What still fails
+
+The remaining worst days are refinements of the same feature, not a new problem:
+
+- **2024-04-15** (bias −6,981) — the model now over-applies the holiday. 2024's
+  administrative extension is encoded as six days from 10 April, but it actually ran
+  from **8 April**; the end is right and the start is wrong.
+- **2024-10-28** (+2,690) — the eve of Cumhuriyet Bayramı is a half working day by law,
+  which is not encoded.
+- **2024-06-17/18/19** — the later days of Kurban are still forecast too high.
 
 *Aside:* the disjoint failure sets mean a combination of the two forecasts would beat
 either. That is a legitimate result but a different task — see the note on using the
