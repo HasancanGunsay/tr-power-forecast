@@ -8,6 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Hasancan Günsay", email = "hasancangunsay16@gmail.com" }]
 dependencies = [
     "httpx>=0.28.1",
+    "matplotlib>=3.11.1",
     "pandas>=3.0.5",
     "pyarrow>=25.0.0",
     "pydantic-settings>=2.14.2",

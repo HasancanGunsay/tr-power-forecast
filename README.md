@@ -25,8 +25,10 @@ Two quantities are forecast here, 24 hours ahead at hourly resolution:
 - **Load** — total system consumption. Driven by weather, calendar effects and economic
   activity; comparatively smooth and predictable.
 - **Day-ahead price** — the market clearing price. Driven by the merit order of
-  generation, renewable availability, fuel costs and scarcity; spiky, heavy-tailed and
-  far harder than load.
+  generation, renewable availability and fuel costs. Harder than load, though not for
+  the reason usually assumed: a regulated ceiling truncates the distribution, so the
+  Turkish series is close to symmetric (skewness ≈ 0) rather than heavy-tailed. The
+  difficulty is the level shift between regimes, not the tail.
 
 Forecasting both in one codebase is deliberate: they share features and infrastructure
 but fail in different ways, which makes the comparison informative.
