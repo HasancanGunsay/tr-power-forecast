@@ -8,9 +8,63 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **Status: in progress.** The data pipeline is being built first; no modelling results
-> exist yet. This README will carry the results table and its baseline comparison as
-> soon as there is something honest to put in it.
+> **Status: in progress.** Data pipeline and baselines are done; no learned model
+> exists yet. The table below is the bar those models have to clear.
+
+![Baselines against the published plan](reports/figures/baselines.png)
+
+## Results so far
+
+Consumption, one delivery day ahead. Every forecast is scored on the **24,408 hours
+all four can cover**, because scoring each on its own coverage rewards the method with
+the easiest subset rather than the most skill.
+
+| Forecast | MAE (MWh) | RMSE (MWh) | MAPE | Bias | Coverage |
+|---|---|---|---|---|---|
+| **Published load plan** | **1,020** | **1,526** | **2.9%** | −270 | 100% |
+| Seasonal naive, 168h | 1,676 | 2,878 | 4.9% | −45 | 99.7% |
+| Seasonal naive, 24h *(leaky)* | 1,888 | 3,116 | 5.4% | −5 | **50.0%** |
+| Seasonal naive, 48h | 2,744 | 4,067 | 7.9% | −8 | 99.9% |
+
+Three things this table is worth reading for:
+
+**The 24-hour naive covers exactly half the horizon.** Bids for delivery day D close
+at 12:30 on D-1, and hourly values are stamped at the start of the hour, so the newest
+complete observation is the one stamped 11:00. For any delivery hour after 11:00 the
+"same hour yesterday" had not finished happening when the bid was submitted. It is
+listed because it is the baseline everyone reaches for first, and because a backtest
+that uses it silently reports a number it could never reproduce in production.
+`seasonal_naive` returns `NaN` for those hours rather than a value.
+
+**Last week beats yesterday.** The weekly lag wins by a wide margin, and beats even
+the leaky 24-hour version. At this horizon the day of the week carries more
+information than recency — which says where feature engineering should go first.
+
+**The published plan is genuinely skilful**, roughly 40% better than the best naive
+baseline. It almost certainly uses weather data, which this project does not yet.
+Closing that gap is the point of the next stage.
+
+The plan also runs about 270 MWh low on average. A systematic bias is easier to
+correct than random error, so that is the first thing a model should pick up.
+
+### Is the published plan a fair benchmark?
+
+It would not be, if it were a series quietly revised after delivery. Two checks say it
+is not:
+
+- **It exists before delivery.** Queried mid-morning, the plan already covers all 24
+  hours of the current day, while realised consumption covers only the hours that have
+  actually elapsed.
+- **It never changes.** Re-fetching a full month already on disk returned 744 of 744
+  hours byte-identical.
+
+So it is a genuine ex-ante forecast, frozen once published — a legitimate bar.
+
+> **Remaining caveat.** The exact publication time within the previous day is not yet
+> established. If the plan is issued *after* the 12:30 bid deadline it sees more
+> history than the baselines here are allowed to, and the comparison flatters it.
+> Establishing this needs an observation of when tomorrow's plan first appears, which
+> is a pending task rather than a settled fact.
 
 ## The problem
 

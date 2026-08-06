@@ -15,9 +15,14 @@ models/**
 !models/**/
 !models/**/.gitkeep
 
+# Figures are tracked, unlike data and models. They are small, they are the
+# project's public output, and the README embeds them — an ignored figure shows
+# up on GitHub as a broken image. They are regenerated in full by
+# `python -m powerforecast.analysis.figures`, so a stale one is never load-bearing.
 reports/figures/**
 !reports/figures/**/
 !reports/figures/**/.gitkeep
+!reports/figures/**/*.png
 
 *.parquet
 *.csv

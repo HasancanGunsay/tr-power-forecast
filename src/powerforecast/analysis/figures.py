@@ -33,7 +33,9 @@ from powerforecast.analysis.profiles import (
 )
 from powerforecast.config import PATHS
 from powerforecast.data.panel import add_local_calendar, load_panel
+from powerforecast.evaluation.compare import availability, common_index, compare_forecasts
 from powerforecast.evaluation.metrics import summarize, summarize_by
+from powerforecast.models.baselines import seasonal_naive
 
 SEASONS = {12: "Winter", 1: "Winter", 2: "Winter", 6: "Summer", 7: "Summer", 8: "Summer"}
 
@@ -189,6 +191,58 @@ def figure_price_distribution(panel: pd.DataFrame, directory: Path) -> Path:
 
 
 # --------------------------------------------------------------------------- #
+# 5. Baselines against the published plan
+# --------------------------------------------------------------------------- #
+
+
+def build_baselines(panel: pd.DataFrame) -> dict[str, pd.Series]:
+    """The forecasts every later model is measured against."""
+    actual = panel["consumption_mwh"]
+    return {
+        "official plan": panel["load_plan_mwh"],
+        "naive 24h (leaky)": seasonal_naive(actual, season_hours=24),
+        "naive 48h": seasonal_naive(actual, season_hours=48),
+        "naive 168h": seasonal_naive(actual, season_hours=168),
+    }
+
+
+def figure_baselines(panel: pd.DataFrame, directory: Path) -> Path:
+    actual = panel["consumption_mwh"]
+    baselines = build_baselines(panel)
+    index = common_index(actual, baselines)
+
+    hours = pd.DatetimeIndex(index).tz_convert("Europe/Istanbul").hour
+    by_hour = pd.DataFrame(
+        {
+            name: summarize_by(
+                actual.loc[index],
+                forecast.loc[index],
+                pd.Series(hours, index=index),
+                mape_floor=1.0,
+            )["MAPE_%"]
+            for name, forecast in baselines.items()
+        }
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+
+    table = compare_forecasts(actual, baselines, mape_floor=1.0)
+    axes[0].barh(table.index, table["MAPE_%"], color=["#55A868", "#4C72B0", "#4C72B0", "#4C72B0"])
+    axes[0].set_xlabel("MAPE (%)")
+    axes[0].set_title(f"Scored on the {len(index):,} hours all four cover")
+
+    for name in by_hour.columns:
+        axes[1].plot(by_hour.index, by_hour[name], label=name)
+    axes[1].set_xlabel("hour of day (Europe/Istanbul)")
+    axes[1].set_ylabel("MAPE (%)")
+    axes[1].set_title("Error by delivery hour")
+    axes[1].legend(fontsize=8)
+
+    fig.suptitle("The published plan beats every naive baseline", fontsize=13)
+    return _save(fig, "baselines.png", directory)
+
+
+# --------------------------------------------------------------------------- #
 # Findings
 # --------------------------------------------------------------------------- #
 
@@ -229,6 +283,16 @@ def report(panel: pd.DataFrame) -> None:
     yearly = panel.groupby("year")["price_try_mwh"].agg(["median", "mean", "max"])
     print(yearly.to_string(float_format=lambda v: f"{v:,.0f}"))
 
+    print("\n[5] BASELINE LEADERBOARD")
+    baselines = build_baselines(panel)
+    index = common_index(actual, baselines)
+    print(f"  scored on {len(index):,} hours covered by all four")
+    board = compare_forecasts(actual, baselines, mape_floor=1.0)
+    print(board.to_string(float_format=lambda v: f"{v:,.1f}"))
+
+    print("\n  availability over the full history")
+    print(availability(baselines).to_string(float_format=lambda v: f"{v:,.1f}"))
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -241,6 +305,7 @@ def main() -> None:
     print("\nFigures written:")
     for builder in (
         figure_benchmark,
+        figure_baselines,
         figure_consumption_profile,
         figure_price_regime,
         figure_price_distribution,
