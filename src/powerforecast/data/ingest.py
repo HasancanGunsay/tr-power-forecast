@@ -195,8 +195,8 @@ def _series_dir(spec: SeriesSpec, root: Path | None) -> Path:
     return (root or PATHS.raw) / spec.name
 
 
-def write_raw(frame: pd.DataFrame, spec: SeriesSpec, *, root: Path | None = None) -> list[Path]:
-    """Write a series to `<root>/<series>/YYYY-MM.parquet`, one file per month.
+def write_monthly(frame: pd.DataFrame, name: str, *, root: Path | None = None) -> list[Path]:
+    """Write any hourly frame to `<root>/<name>/YYYY-MM.parquet`, one file per month.
 
     An existing month is **merged with**, not replaced by, the incoming rows: on
     a conflicting timestamp the new value wins, and rows the caller did not
@@ -204,16 +204,17 @@ def write_raw(frame: pd.DataFrame, spec: SeriesSpec, *, root: Path | None = None
 
     Replacing outright would be simpler, and it is correct when a whole series
     is written in one call. It is silently destructive when months arrive one at
-    a time: storage partitions on UTC while requests are made in Istanbul local
-    time, so a request for January also returns the first hours of the UTC
-    February file, and the February request returns the last hours of the UTC
-    January one. Under replace semantics, each write would truncate its
-    neighbour's file to the handful of overlapping hours.
+    a time: storage partitions on UTC while requests are made in local time, so a
+    request for local January also returns hours belonging to the UTC December
+    and February files. Under replace semantics, each write would truncate its
+    neighbour's file to the handful of overlapping hours — which is exactly the
+    bug this function was rewritten to fix.
 
     Merging keeps re-runs idempotent, which is the property that mattered in the
-    first place.
+    first place. This is deliberately the only implementation of that logic in
+    the project; a second copy is a second chance to get it wrong.
     """
-    directory = _series_dir(spec, root)
+    directory = (root or PATHS.raw) / name
     directory.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
@@ -234,6 +235,20 @@ def write_raw(frame: pd.DataFrame, spec: SeriesSpec, *, root: Path | None = None
         group.to_parquet(path, index=True)
         written.append(path)
     return written
+
+
+def read_monthly(name: str, *, root: Path | None = None) -> pd.DataFrame:
+    """Read every stored month of a named dataset back into one frame."""
+    directory = (root or PATHS.raw) / name
+    files = sorted(directory.glob("*.parquet"))
+    if not files:
+        return pd.DataFrame()
+    return pd.concat([pd.read_parquet(path) for path in files]).sort_index()
+
+
+def write_raw(frame: pd.DataFrame, spec: SeriesSpec, *, root: Path | None = None) -> list[Path]:
+    """Write one EPİAŞ series, partitioned by month. See `write_monthly`."""
+    return write_monthly(frame, spec.name, root=root)
 
 
 def stored_months(spec: SeriesSpec, *, root: Path | None = None) -> set[str]:

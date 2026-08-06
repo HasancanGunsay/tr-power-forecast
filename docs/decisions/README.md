@@ -21,6 +21,7 @@ history of a mistake is part of what makes the log useful.
 | [0002](0002-retry-and-rate-limiting.md) | Retry policy and rate limiting | Accepted |
 | [0003](0003-raw-storage-layout.md) | Raw storage layout and merge semantics | Accepted |
 | [0004](0004-forecast-origin.md) | Forecast origin and the information set | Accepted |
+| [0005](0005-weather-and-fair-comparison.md) | Archived weather forecasts, and correcting our own bias | Accepted |
 
 ## Template
 

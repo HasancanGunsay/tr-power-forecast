@@ -18,15 +18,19 @@ from pathlib import Path
 import pandas as pd
 
 from powerforecast.data.epias import ALL_SERIES, SeriesSpec
-from powerforecast.data.ingest import read_raw
+from powerforecast.data.ingest import read_monthly, read_raw
 
 LOCAL_TZ = "Europe/Istanbul"
+
+
+WEATHER_COLUMNS = ("temperature_c", "hdd", "cdd")
 
 
 def load_panel(
     specs: tuple[SeriesSpec, ...] = ALL_SERIES,
     *,
     root: Path | None = None,
+    with_weather: bool = True,
 ) -> pd.DataFrame:
     """Load every series into a single hourly frame indexed in UTC.
 
@@ -55,7 +59,29 @@ def load_panel(
     complete = pd.date_range(panel.index[0], panel.index[-1], freq="h", tz="UTC")
     panel = panel.reindex(complete)
     panel.index.name = "timestamp"
+
+    if with_weather:
+        panel = _join_weather(panel, root=root)
+
     return panel
+
+
+def _join_weather(panel: pd.DataFrame, *, root: Path | None) -> pd.DataFrame:
+    """Attach temperature columns if they have been backfilled.
+
+    Absence is tolerated rather than fatal. The archive starts in 2022 while the
+    electricity series starts in 2021, so weather is genuinely missing for the
+    first year — and a project should still run end to end before every optional
+    dataset has been downloaded. Missing columns become nulls, and the backtest
+    drops incomplete rows inside each fold, which keeps the evaluation window
+    identical to the weather-free run.
+    """
+    stored = read_monthly("weather", root=root)
+    if stored.empty:
+        return panel
+
+    available = [column for column in WEATHER_COLUMNS if column in stored.columns]
+    return panel.join(stored[available])
 
 
 def add_local_calendar(panel: pd.DataFrame, *, tz: str = LOCAL_TZ) -> pd.DataFrame:

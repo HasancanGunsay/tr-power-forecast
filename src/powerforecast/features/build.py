@@ -43,6 +43,7 @@ class FeatureSpec:
     target_lags: tuple[int, ...] = DEFAULT_TARGET_LAGS
     origin_windows: tuple[int, ...] = DEFAULT_ORIGIN_WINDOWS
     origin_offsets: tuple[int, ...] = (0, 24)
+    include_weather: bool = True
     include_load_plan: bool = False
     last_observed_hour: int = LAST_OBSERVED_HOUR
     tz: str = LOCAL_TZ
@@ -104,6 +105,17 @@ def build_design_matrix(
                     tz=spec.tz,
                 )
             )
+
+    if spec.include_weather:
+        # Weather needs no lag and no availability mask, which is worth being
+        # explicit about. These columns hold the temperature that was being
+        # *forecast* for the delivery hour one day earlier, so they were already
+        # on the bidder's desk. Using realised temperature here would be the
+        # single worst leak available in this project — it would look excellent
+        # in backtest and collapse in production.
+        for column in ("temperature_c", "hdd", "cdd"):
+            if column in panel.columns:
+                columns.append(panel[column])
 
     if spec.include_load_plan:
         if "load_plan_mwh" not in panel.columns:
