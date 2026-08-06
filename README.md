@@ -51,9 +51,52 @@ usual one, and our model's bias was larger than the corrected plan's.
 strongest baseline** and 11% over the raw plan.
 
 **On RMSE it does not**: 1,748 against 1,744 — a 0.2% difference, which is noise. Since
-RMSE weights large errors more heavily, the reading is that the model is better on
-typical hours and no better on the extreme ones. That is a real limitation, and it is
-where the next work goes.
+RMSE weights large errors more heavily, the remaining gap lives in the tail. Chasing
+that down turned out to be the most informative thing in the project so far.
+
+### The tail: two forecasts that fail on different days
+
+Error is heavily concentrated — the worst **1% of hours carry 29.5%** of all squared
+error, and the worst 5% carry 57.7%. So RMSE is decided by a few hundred hours, and
+improving the average hour cannot move it.
+
+Scoring each forecast on the *other's* hardest hours shows they are not competing for
+the same failures at all:
+
+| Hardest 1% of hours, defined by | This model's MAE | Corrected plan's MAE |
+|---|---|---|
+| the corrected plan | **2,186** | 7,926 |
+| this model | 9,279 | **1,881** |
+
+Near mirror images. The tie on RMSE is not "the model is uniformly worse in the tail" —
+each forecast has its own catastrophic set, of similar size, and they barely overlap.
+
+### The model's catastrophic days are religious holidays
+
+Ranking delivery days by error and reading them chronologically:
+
+```
+2024-04-08/09/10     2025-03-29/30/31     2026-03-19/20/23
+2024-06-15/17        2025-06-05/06/10     2026-05-25/26/27
+```
+
+Two clusters, each sliding about **11 days earlier every year**, roughly 70 days apart —
+the signature of the Hijri calendar. These are Ramazan and Kurban Bayramı. The remaining
+worst days are fixed-date national holidays (1 January, 23 April, 29 October).
+
+On those days the model's bias is **+7,702 MWh**: it forecasts an ordinary day while
+demand collapses, because industry shuts and cities empty. The published plan handles
+them, which is most of why it wins the tail.
+
+[`features/calendar.py`](src/powerforecast/features/calendar.py) deliberately omits
+holidays, on the grounds that the religious ones cannot be derived from a timestamp and
+a fixed-date flag would mark the wrong days while looking correct. That call is now
+confirmed by measurement, and its cost is quantified. Adding a proper Turkish holiday
+calendar is the next step, and it is the highest-value one available.
+
+*Aside:* the disjoint failure sets mean a combination of the two forecasts would beat
+either. That is a legitimate result but a different task — see the note on using the
+plan as a feature above — so it is recorded rather than claimed.
 
 ### Weather roughly doubled the genuine advantage
 

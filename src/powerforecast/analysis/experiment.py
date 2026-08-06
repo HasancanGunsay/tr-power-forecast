@@ -179,11 +179,29 @@ def figure_model_comparison(
     return path
 
 
+def save_predictions(
+    forecasts: dict[str, pd.Series],
+    actual: pd.Series,
+    path: Path,
+) -> Path:
+    """Persist out-of-sample predictions so diagnostics need not refit.
+
+    The backtest takes minutes; error analysis takes seconds. Keeping them apart
+    means a question about *where* the model fails can be asked repeatedly and
+    cheaply, which is the difference between investigating and guessing.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame({"actual": actual, **forecasts})
+    frame.to_parquet(path, index=True)
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-days", type=int, default=365 * 3)
     parser.add_argument("--test-days", type=int, default=30)
     parser.add_argument("--out", type=Path, default=PATHS.reports / "figures")
+    parser.add_argument("--predictions", type=Path, default=PATHS.reports / "predictions.parquet")
     args = parser.parse_args()
 
     leaderboard, forecasts, actual = run(args.train_days, args.test_days)
@@ -202,7 +220,8 @@ def main() -> None:
         verdict = "better" if change < 0 else "worse"
         print(f"  {name:16} {change:+6.1f}%  {verdict}")
 
-    print(f"\nfigure: {figure_model_comparison(forecasts, actual, leaderboard, args.out)}")
+    print(f"\nfigure     : {figure_model_comparison(forecasts, actual, leaderboard, args.out)}")
+    print(f"predictions: {save_predictions(forecasts, actual, args.predictions)}")
 
 
 if __name__ == "__main__":
