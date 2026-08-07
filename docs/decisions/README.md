@@ -22,6 +22,7 @@ history of a mistake is part of what makes the log useful.
 | [0003](0003-raw-storage-layout.md) | Raw storage layout and merge semantics | Accepted |
 | [0004](0004-forecast-origin.md) | Forecast origin and the information set | Accepted |
 | [0005](0005-weather-and-fair-comparison.md) | Archived weather forecasts, and correcting our own bias | Accepted |
+| [0006](0006-model-store.md) | A model store, not a pickle | Accepted |
 
 ## Template
 

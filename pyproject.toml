@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Hasancan Günsay", email = "hasancangunsay16@gmail.com" }]
 dependencies = [
+    "fastapi>=0.141.1",
     "hijridate>=2.6.0",
     "httpx>=0.28.1",
     "lightgbm>=4.7.0",
@@ -15,6 +16,7 @@ dependencies = [
     "pyarrow>=25.0.0",
     "pydantic-settings>=2.14.2",
     "scikit-learn>=1.9.0",
+    "uvicorn[standard]>=0.52.1",
 ]
 
 [dependency-groups]

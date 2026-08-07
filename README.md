@@ -298,6 +298,45 @@ uv run python -m powerforecast.analysis.experiment
 
 The experiment refits four model variants across 31 folds and takes a few minutes.
 
+## Serving
+
+The backtest measures an approach; serving ships one model. Train a single model on all
+available history and store it with a card describing what it is:
+
+```bash
+uv run python -m powerforecast.models.train
+```
+
+That writes `models/load-lightgbm/<version>/`, holding the fitted estimator and a
+`card.json` recording its feature columns *in order*, the feature spec, the training
+window, the seed and the library versions it was fitted under. Nothing loads a bare
+pickle — see [ADR 0006](docs/decisions/0006-model-store.md).
+
+Run the service:
+
+```bash
+uv run uvicorn powerforecast.serving.app:app --reload
+```
+
+`GET /health` reports which model version is answering, and how stale the cached data
+is. `GET /forecast?date=2026-08-01` returns all 24 hours of that delivery day, together
+with the forecast origin and the model version that produced them. Interactive
+documentation is generated from the code at `/docs`.
+
+Three refusals are deliberate and are the reason the service is worth more than a
+notebook:
+
+- **A partial day is an error, not a short answer.** If any hour of the requested day
+  lacks a complete feature set the request fails with 422, naming the missing columns
+  and how far the data actually reaches. Twenty-three values where the market needs
+  twenty-four is a position nobody bid.
+- **Feature mismatch cannot be overridden.** The stored card fixes the columns and their
+  order; a design matrix that differs raises rather than predicting. Reordering is the
+  dangerous case, because the shapes still match and nothing else objects.
+- **The process refuses to start** if the model is missing or was fitted under different
+  library versions. A service that starts and then errors looks healthy to everything
+  watching it.
+
 ## Design decisions
 
 Non-obvious choices are recorded in [`docs/decisions/`](docs/decisions/) — the
@@ -311,8 +350,9 @@ src/powerforecast/
 ├── seed.py         # reproducibility helpers
 ├── data/           # API clients, ingestion, schema validation, weather
 ├── features/       # availability rule, calendar, lags, design matrix
-├── models/         # naive baselines and estimator factories
+├── models/         # baselines, estimator factories, training, the model store
 ├── evaluation/     # metrics, rolling-origin backtesting, comparison
+├── serving/        # the HTTP forecast service
 └── analysis/       # figures and the experiment runner
 ```
 
