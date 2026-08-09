@@ -19,11 +19,38 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
 # Application layer.
+#
+# README.md is here rather than beside pyproject.toml, and the placement is
+# deliberate. hatchling validates `readme = "README.md"` when the project is
+# installed, so the build fails without it — but copying it next to the manifest
+# would put it in the dependency layer, and a typo fix in the README would then
+# reinstall every dependency. It belongs with the code, which is what it
+# documents and what it changes alongside.
+COPY README.md ./
 COPY src/ ./src/
 RUN uv sync --frozen --no-dev
 
 
 FROM python:3.12-slim AS runtime
+
+# LightGBM's wheel links against OpenMP, which python:3.12-slim does not ship.
+# The Windows wheel bundles it, so this gap is invisible locally and fatal here:
+# `libgomp.so.1: cannot open shared object file`, raised from ctypes rather than
+# from Python, because the missing piece is a C library and not a package.
+#
+# uv resolves Python packages, not system libraries. A correct lockfile and a
+# `--frozen` install say nothing about this, which is the useful lesson: the
+# reproducibility guarantee stops at the language boundary.
+#
+# The index is deleted inside the same RUN, not in a later one. Layers are
+# immutable, so a `rm` in a subsequent instruction only records that the files
+# are gone — they stay in the layer beneath and in the image. Removing them has
+# to happen in the command that created them.
+#
+# Before USER, because apt-get needs root.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root user. A container process that does not need root should
 # not have it.

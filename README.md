@@ -337,6 +337,36 @@ notebook:
   library versions. A service that starts and then errors looks healthy to everything
   watching it.
 
+### In a container
+
+```bash
+docker build -t tr-power-forecast .
+```
+
+```bash
+docker run --rm -p 8000:8000 \
+  -v "$(pwd)/data:/app/data:ro" \
+  -v "$(pwd)/models:/app/models:ro" \
+  tr-power-forecast
+```
+
+The image is 245 MB and holds the code and its dependencies — most of it the virtual
+environment, in a single 670 MB layer before compression. Data and models are mounted at
+run time rather than baked in, read-only: both change on schedules of their own, and an
+image containing one model could only ever serve that model. Rolling back to yesterday's
+model is a different mount, not a rebuild.
+
+Two things the image needs that are easy to miss locally, both recorded in the
+Dockerfile:
+
+- `README.md` has to be copied, because hatchling validates the `readme` field when the
+  project is installed. It sits with the source rather than with the manifest, so a
+  documentation edit does not invalidate the dependency layer.
+- `libgomp1` has to be installed. LightGBM links against OpenMP; the Windows wheel
+  bundles it and the Linux wheel expects the system to provide it, which `slim` does
+  not. A correct lockfile says nothing about this — **uv resolves Python packages, not
+  system libraries**, and that is where the reproducibility guarantee stops.
+
 ## Design decisions
 
 Non-obvious choices are recorded in [`docs/decisions/`](docs/decisions/) — the
