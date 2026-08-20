@@ -35,6 +35,7 @@ FACTORIES: dict[str, Callable[[], Any]] = {"lightgbm": make_lightgbm, "ridge": m
 def train(
     *,
     model: str = "lightgbm",
+    train_until: pd.Timestamp | str | None = None,
     spec: FeatureSpec | None = None,
     panel: pd.DataFrame | None = None,
     name: str | None = None,
@@ -59,6 +60,25 @@ def train(
     if usable.empty:
         raise ValueError("no complete rows in the design matrix; has the panel been backfilled?")
 
+    if train_until is not None:
+        # A deliberate cut-off, for two reasons that both matter.
+        #
+        # Retraining: production models are refit on a schedule, and the version
+        # that replaces this one has to be trained on more history than it did —
+        # which means the boundary has to be expressible rather than implicit.
+        #
+        # Honest monitoring: a forecast for a day inside the training window is
+        # not a forecast, it is a fit. Being able to train to a date is what
+        # makes it possible to produce genuinely out-of-sample forecasts for days
+        # that have already happened, and therefore to test the monitoring layer
+        # against known outcomes rather than waiting weeks for new ones.
+        cutoff = pd.Timestamp(train_until)
+        if cutoff.tz is None:
+            cutoff = cutoff.tz_localize("UTC")
+        usable = usable[usable <= cutoff]
+        if usable.empty:
+            raise ValueError(f"no usable rows on or before {cutoff}")
+
     features = features.loc[usable]
     target = target.loc[usable]
 
@@ -78,12 +98,18 @@ def main() -> None:
     parser.add_argument("--model", choices=sorted(FACTORIES), default="lightgbm")
     parser.add_argument("--name", default=None, help="model name in the store")
     parser.add_argument("--notes", default="", help="why this model was trained")
+    parser.add_argument(
+        "--train-until",
+        default=None,
+        help="last timestamp to train on, ISO; omit to use every usable row",
+    )
     parser.add_argument("--no-weather", action="store_true")
     parser.add_argument("--out", type=Path, default=PATHS.models)
     args = parser.parse_args()
 
     saved = train(
         model=args.model,
+        train_until=args.train_until,
         spec=FeatureSpec(include_weather=not args.no_weather),
         name=args.name,
         directory=args.out,

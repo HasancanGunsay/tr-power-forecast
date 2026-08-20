@@ -21,11 +21,11 @@ consequences run through everything below.
 
 1. *The target is unknown.* `usable_rows` — the helper the training code uses —
    requires the target to be present, and for a future delivery day it never is.
-   Using it here would reject every real request. See `_complete_rows`.
+   Using it here would reject every real request.
 2. *The delivery day may not be in the panel at all.* Storage holds observed
    hours; tomorrow has none. The design matrix therefore has to be built over a
    grid that has been *extended* to cover the requested day, or there are no
-   rows to predict from. See `_extended_panel`.
+   rows to predict from.
 3. *Nothing may fail silently.* A backtest that quietly drops an hour loses a
    little precision in a number. A service that quietly drops an hour returns
    23 values where the market needs 24, and the missing hour is a position
@@ -38,7 +38,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -47,11 +47,14 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from powerforecast.data.panel import load_panel
-from powerforecast.features.availability import LOCAL_TZ, forecast_origins
-from powerforecast.features.build import build_design_matrix
-from powerforecast.models.persistence import ModelStoreError, SavedModel, load_model
-
-DEFAULT_MODEL_NAME = "load-lightgbm"
+from powerforecast.features.availability import LOCAL_TZ
+from powerforecast.forecasts.day import IncompleteForecastError, forecast_day
+from powerforecast.models.persistence import (
+    DEFAULT_MODEL_NAME,
+    ModelStoreError,
+    SavedModel,
+    load_model,
+)
 
 # How long a loaded panel may be reused before it is read from disk again.
 #
@@ -340,24 +343,22 @@ def get_state(request: Request) -> ServiceState:
 # ---------------------------------------------------------------------------
 # The forecast itself
 # ---------------------------------------------------------------------------
+#
+# Everything that decides *what a forecast is* lives in `forecasts.day`, not
+# here. The daily job needs the same logic, and two implementations of "build
+# the design matrix for a delivery day" would drift apart while both continued
+# to return plausible numbers — the most expensive kind of divergence, because
+# nothing fails.
+#
+# What remains below is the part that is genuinely HTTP: turning a domain
+# result into a response body, and a domain refusal into a status code.
 
 
 def _forecast_day(state: ServiceState, delivery_date: date) -> ForecastResponse:
-    """Build features for one delivery day, predict, and refuse anything partial."""
-    card = state.model.card
-    hours = _delivery_hours(delivery_date)
-
-    panel = _extended_panel(state.panel.get(), through=hours[-1])
-    features, _ = build_design_matrix(panel, card.spec())
-
-    # Reindex, rather than filter. Filtering would return whatever happens to be
-    # present; reindexing asks for exactly the 24 hours wanted and leaves a
-    # visible hole — as NaN — wherever one is absent. The difference is whether
-    # a missing hour is something to be discovered or something to be noticed.
-    day = features.reindex(hours)
-    complete = _complete_rows(day)
-
-    if len(complete) < len(hours):
+    """Adapt `forecasts.day.forecast_day` to an HTTP response."""
+    try:
+        produced = forecast_day(state.model, state.panel.get(), delivery_date)
+    except IncompleteForecastError as error:
         raise HTTPException(
             # 422, the same code FastAPI returns for a malformed parameter. The
             # request was well formed but cannot be acted on, which is exactly
@@ -365,126 +366,29 @@ def _forecast_day(state: ServiceState, delivery_date: date) -> ForecastResponse:
             # and 500 would suggest the service is broken. Neither is true here —
             # the data has not arrived yet.
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=_incomplete_detail(delivery_date, day, complete, panel),
-        )
+            detail=error.as_dict(),
+        ) from error
 
-    predictions = state.model.predict(day.loc[complete])
-    local_hours = pd.DatetimeIndex(complete).tz_convert(LOCAL_TZ).hour
+    stamps = pd.DatetimeIndex(produced.values.index)
+    local_hours = stamps.tz_convert(LOCAL_TZ).hour
 
     return ForecastResponse(
-        delivery_date=delivery_date,
-        forecast_origin=forecast_origins(hours).iloc[0].to_pydatetime(),
-        model_name=card.name,
-        model_version=card.version,
-        generated_at=datetime.now(UTC),
+        delivery_date=produced.delivery_date,
+        forecast_origin=produced.forecast_origin.to_pydatetime(),
+        model_name=produced.model_name,
+        model_version=produced.model_version,
+        generated_at=produced.generated_at,
         hours=[
             HourlyForecast(
                 timestamp=timestamp.to_pydatetime(),
                 local_hour=int(local_hour),
                 forecast_mwh=float(value),
             )
-            for timestamp, local_hour, value in zip(complete, local_hours, predictions, strict=True)
+            for timestamp, local_hour, value in zip(
+                stamps, local_hours, produced.values, strict=True
+            )
         ],
     )
-
-
-def _delivery_hours(delivery_date: date) -> pd.DatetimeIndex:
-    """Every hour of one local calendar day, as UTC timestamps.
-
-    Not `range(24)`. A calendar day is 24 hours only when there is no daylight
-    saving transition in it; where there is, it is 23 or 25. Türkiye has been on
-    permanent UTC+3 since 2016, so today the answer is always 24 — but this
-    project also has a European leg waiting on an ENTSO-E token, and the day the
-    first German delivery day arrives, `range(24)` would drop or duplicate an
-    hour twice a year without saying so.
-
-    `DateOffset(days=1)` rather than `Timedelta(hours=24)` for the same reason:
-    the offset means "the same wall-clock time tomorrow", which is the thing
-    actually meant, while the timedelta means "24 hours later", which on a
-    transition day is a different moment.
-    """
-    start = pd.Timestamp(delivery_date, tz=LOCAL_TZ)
-    end = start + pd.DateOffset(days=1)
-    local = pd.date_range(start, end, freq="h", inclusive="left")
-    return pd.DatetimeIndex(local).tz_convert("UTC")
-
-
-def _extended_panel(panel: pd.DataFrame, *, through: pd.Timestamp) -> pd.DataFrame:
-    """Extend the hourly grid so the delivery day has rows to predict from.
-
-    Storage holds observed hours. Tomorrow has none — so tomorrow is not in the
-    panel, and a design matrix built from the panel as stored contains no row
-    for any hour of it. Asking the model to predict for a day that does not
-    appear in its input is not a failure the code would report; it is simply an
-    empty result.
-
-    Reindexing onto a longer grid adds those rows with every column null. That
-    is enough for most of the design matrix, and *why* it is enough is the
-    availability discipline from ADR 0004 paying off:
-
-    * calendar and holiday features are computed from the index itself, and a
-      calendar is known years ahead;
-    * every lag is at least 48 hours and is read from history, which is present.
-
-    What it is *not* enough for is weather, which has to be fetched for the
-    delivery day. When it has not been, the columns stay null, the completeness
-    check fails, and the request is refused with those column names in it. That
-    is the correct outcome: a temperature-blind forecast for a hot August day is
-    not a slightly worse forecast, and dropping the feature to force an answer
-    would hide the real problem, which is that the weather job did not run.
-    """
-    index = pd.DatetimeIndex(panel.index)
-    if through <= index.max():
-        return panel
-    extended = pd.date_range(index.min(), through, freq="h", tz="UTC")
-    return panel.reindex(extended)
-
-
-def _complete_rows(features: pd.DataFrame) -> pd.DatetimeIndex:
-    """Hours where every feature is present.
-
-    Deliberately *not* `features.build.usable_rows`, which also requires the
-    target to be present. That is right for training — a row with no target
-    teaches nothing — and exactly wrong here, because the target for a future
-    delivery day is the thing being predicted. Reusing it would make the service
-    able to forecast only days whose answer was already known.
-
-    Worth pausing on, because it is the shape of a mistake that is easy to make
-    and produces a service that passes every test written against historical
-    dates and fails on the first real request.
-    """
-    return pd.DatetimeIndex(features.index[features.notna().all(axis=1)])
-
-
-def _incomplete_detail(
-    delivery_date: date,
-    day: pd.DataFrame,
-    complete: pd.Index,
-    panel: pd.DataFrame,
-) -> dict[str, object]:
-    """Explain a refusal well enough that the reader knows what to fix.
-
-    A bare "422 Unprocessable Entity" tells an operator that something is wrong
-    and nothing about what. The three facts below turn a support question into a
-    self-service fix: how many hours were short, which columns were missing, and
-    how far the data actually reaches. The last one usually is the answer —
-    the ingestion job has not run.
-    """
-    missing_columns = sorted(day.columns[day.isna().any()].tolist())
-    observed = pd.DatetimeIndex(panel.index)[panel.notna().any(axis=1)]
-    return {
-        "message": (
-            f"cannot forecast {delivery_date.isoformat()}: "
-            f"{len(complete)} of {len(day)} hours have a complete feature set"
-        ),
-        "missing_features": missing_columns,
-        "data_available_until": observed.max().isoformat() if len(observed) else None,
-        "hint": (
-            "Ingest the missing history and weather first: "
-            "`uv run python -m powerforecast.data.backfill` and "
-            "`uv run python -m powerforecast.data.backfill_weather`."
-        ),
-    }
 
 
 # The object uvicorn is pointed at. Built at import time, but note that nothing

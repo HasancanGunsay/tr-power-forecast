@@ -8,9 +8,15 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **Status: in progress.** Short version: the best model beats the published forecast by
+> **Status: in progress.** In backtest, the best model beats the published forecast by
 > **27% on MAE** and **29% on RMSE** — and still wins by 25% and 27% against that
 > forecast with its systematic bias already corrected, which is the harder comparison.
+>
+> **That is a backtest claim, and the deployed configuration does not yet match it.**
+> The winning variant applies a bias correction that is not part of the served model, and
+> the first genuine out-of-sample check — 30 delivery days produced by the daily job —
+> puts the deployed model *behind* the published plan. Measured, reported, and being
+> worked on: see [Running unattended, and checking afterwards](#running-unattended-and-checking-afterwards).
 
 ![Learned models against the published plan](reports/figures/model_comparison.png)
 
@@ -367,6 +373,59 @@ Dockerfile:
   not. A correct lockfile says nothing about this — **uv resolves Python packages, not
   system libraries**, and that is where the reproducibility guarantee stops.
 
+## Running unattended, and checking afterwards
+
+Produce and store tomorrow's forecast before the bid deadline:
+
+```bash
+uv run python -m powerforecast.jobs.daily_forecast
+```
+
+It refreshes the panel, fetches the delivery day's temperature from the live forecast
+run — the same quantity training used, read from the other side of the day — predicts,
+and merges 24 rows into `data/processed/forecasts/`. Re-running the same day updates
+rather than duplicates; schedulers retry, and a job that is not idempotent corrupts the
+record on its second run. Failures exit with distinct codes (missing model, weather
+unavailable, incomplete day) so an alert can say which stage broke without anyone
+opening a log.
+
+Then check the forecasts against what happened:
+
+```bash
+uv run python -m powerforecast.monitoring.verify
+```
+
+Two things make this more than a scoreboard, both recorded in
+[ADR 0007](docs/decisions/0007-forecast-store-and-drift.md):
+
+- **Drift is judged on skill, not on error.** Error rises both when a model decays and
+  when a period is simply harder, and a recent-versus-baseline comparison cannot tell
+  those apart. The operator's published forecast is a free control, so the verdict is a
+  difference-in-differences: `DEGRADED` (we lost ground the plan did not),
+  `HARDER_PERIOD` (everyone's error rose), or `OK`.
+- **In-sample hours are excluded and the exclusions are printed.** A delivery hour
+  inside the producing model's training window measures the fit, not the forecast. This
+  is not a hypothetical: the first pipeline run reported MAE 285 against a backtest MAE
+  of 914, entirely because every day it scored lay before the model's `train_end`.
+
+### What the out-of-sample check actually says
+
+A model trained to 2026-06-30 and used for the 30 delivery days from 5 July to 3 August:
+
+| | MAE | RMSE | MAPE |
+|---|---|---|---|
+| deployed model (no bias correction) | 1,165 | 1,498 | 2.54% |
+| official plan, same hours | 1,036 | — | — |
+
+**Mean daily skill against the plan: −0.36.** On this window the deployed configuration
+is *worse* than the operator's own forecast, and the drift check reports `DEGRADED`
+(skill 0.046 → −0.265). The error concentrates on weekends — Saturday MAE 1,667, Sunday
+1,507, both systematically over-forecasting — against roughly 800–1,270 on weekdays.
+
+The headline 27% figure above comes from the backtest's **bias-corrected** variant,
+which is not what is deployed. Closing that gap is the outstanding work; until it is
+closed, no claim is made that the deployed model beats the plan.
+
 ## Design decisions
 
 Non-obvious choices are recorded in [`docs/decisions/`](docs/decisions/) — the
@@ -382,7 +441,10 @@ src/powerforecast/
 ├── features/       # availability rule, calendar, lags, design matrix
 ├── models/         # baselines, estimator factories, training, the model store
 ├── evaluation/     # metrics, rolling-origin backtesting, comparison
+├── forecasts/      # producing one delivery day, and where produced forecasts live
 ├── serving/        # the HTTP forecast service
+├── jobs/           # the unattended daily run
+├── monitoring/     # verification against outcomes, and drift
 └── analysis/       # figures and the experiment runner
 ```
 

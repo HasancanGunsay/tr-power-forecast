@@ -51,6 +51,11 @@ import powerforecast
 from powerforecast.config import PATHS, RANDOM_SEED
 from powerforecast.features.build import FeatureSpec
 
+# The model every caller means when it does not say otherwise. Defined here,
+# with the store, so the service and the daily job cannot disagree about which
+# model is "the" model.
+DEFAULT_MODEL_NAME = "load-lightgbm"
+
 MODEL_FILE = "model.pkl"
 CARD_FILE = "card.json"
 
@@ -360,6 +365,31 @@ def load_model(
     # this project wrote; see the module docstring for why that is a real limit.
     estimator = pickle.loads(model_path.read_bytes())
     return SavedModel(estimator=estimator, card=card, path=target_dir)
+
+
+def read_card(
+    name: str,
+    version: str = "latest",
+    *,
+    directory: Path | None = None,
+) -> ModelCard:
+    """Read a model's card without loading the model.
+
+    Cheap on purpose. The monitoring layer needs one fact from each card — the
+    end of the training window — for every model version that ever produced a
+    stored forecast. Unpickling an estimator to read a JSON field would make an
+    audit of six months of forecasts an expensive operation, and an expensive
+    audit is one that gets run less often than it should.
+
+    It is also safer: reading JSON does not execute code, while unpickling does.
+    """
+    root = (directory or PATHS.models) / name
+    resolved = latest_version(name, directory=directory) if version == "latest" else version
+    path = root / resolved / CARD_FILE
+
+    if not path.exists():
+        raise ModelNotFoundError(f"no card at {path}")
+    return ModelCard.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
 def list_versions(name: str, *, directory: Path | None = None) -> list[str]:

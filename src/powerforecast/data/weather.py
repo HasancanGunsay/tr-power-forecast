@@ -24,12 +24,18 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 import pandas as pd
 
 ARCHIVE_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+
+# The live endpoint, used only when forecasting a day that has not happened yet.
+# See `fetch_live_all_cities` for why it needs a different variable name and a
+# guard on which day it may be asked about.
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+LIVE_VARIABLE = "temperature_2m"
 
 # Earliest date the archived-forecast API can serve.
 ARCHIVE_START = date(2022, 1, 1)
@@ -91,18 +97,38 @@ def fetch_city(
     converting a local response afterwards would reintroduce exactly the
     daylight-saving ambiguity that UTC storage exists to avoid.
     """
+    return _fetch_hourly(
+        city,
+        url=ARCHIVE_URL,
+        variable=FORECAST_VARIABLE,
+        start=start,
+        end=end,
+        client=client,
+    )
+
+
+def _fetch_hourly(
+    city: City,
+    *,
+    url: str,
+    variable: str,
+    start: date,
+    end: date,
+    client: httpx.Client | None = None,
+) -> pd.Series:
+    """One city, one variable, one date range, from either Open-Meteo endpoint."""
     owned = client is None
     client = client or httpx.Client(timeout=DEFAULT_TIMEOUT)
 
     try:
         response = client.get(
-            ARCHIVE_URL,
+            url,
             params={
                 "latitude": city.latitude,
                 "longitude": city.longitude,
                 "start_date": start.isoformat(),
                 "end_date": end.isoformat(),
-                "hourly": FORECAST_VARIABLE,
+                "hourly": variable,
                 "timezone": "UTC",
             },
         )
@@ -120,13 +146,13 @@ def fetch_city(
 
     body = response.json()
     hourly = body.get("hourly")
-    if not hourly or FORECAST_VARIABLE not in hourly:
+    if not hourly or variable not in hourly:
         raise WeatherError(
-            f"Open-Meteo returned no {FORECAST_VARIABLE!r} for {city.name}; got keys {list(body)}"
+            f"Open-Meteo returned no {variable!r} for {city.name}; got keys {list(body)}"
         )
 
     index = pd.to_datetime(hourly["time"], utc=True)
-    values = pd.to_numeric(hourly[FORECAST_VARIABLE], errors="coerce")
+    values = pd.to_numeric(hourly[variable], errors="coerce")
     series = pd.Series(values, index=index, name=city.name, dtype="float64")
     series.index.name = "timestamp"
     return series
@@ -158,6 +184,103 @@ def fetch_all_cities(
     frame = pd.concat(columns, axis=1).sort_index()
     frame["temperature_c"] = population_weighted(frame, cities)
     return frame
+
+
+def fetch_live_all_cities(
+    day: date,
+    *,
+    cities: tuple[City, ...] = CITIES,
+    client: httpx.Client | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    min_interval: float = MIN_REQUEST_INTERVAL,
+    today: date | None = None,
+) -> pd.DataFrame:
+    """Temperature for a delivery day that has not happened yet.
+
+    Everything above this function reads the *archive*: for a past delivery day,
+    what was being forecast for it one day earlier. That is the right quantity
+    for training, and it is the reason the model is honest. But the archive
+    cannot answer about tomorrow, because the forecast for tomorrow has not yet
+    become a historical record — so a service asked to forecast tomorrow would
+    have no temperature at all, and refuse.
+
+    This closes that gap, and the important thing is that it closes it with
+    **the same quantity**, not a similar one:
+
+    * *Training* uses `temperature_2m_previous_day1` for delivery day D — the
+      value that was being forecast for D by the run issued on D-1.
+    * *Serving* runs on D-1, shortly before the 12:30 deadline, and reads the
+      live forecast for D — which is the run issued on D-1.
+
+    Those are the same object seen from two sides of the same day. Six months
+    later, this very request is what the archive will return for D. Train and
+    serve therefore see one distribution, not two, and the backtest keeps
+    meaning what it claimed.
+
+    Which is why `day` is checked rather than trusted. The live endpoint will
+    cheerfully return a forecast for D+5 — issued today, five days out, far
+    worse than anything the model was trained on. Nothing about that response
+    would look wrong; the numbers arrive, the columns fill, the service answers,
+    and the error is larger than the backtest ever suggested with no indication
+    why. A day-ahead model must be fed a day-ahead forecast, so anything else is
+    refused here rather than discovered later.
+
+    Args:
+        day: The delivery day. Must be exactly one day after `today`.
+        today: Injectable clock. Tests must not depend on when they run.
+
+    Raises:
+        WeatherError: if `day` is not the day after `today`.
+    """
+    today = today or date.today()
+    if day != today + timedelta(days=1):
+        raise WeatherError(
+            f"the live endpoint may only be used for the next delivery day: "
+            f"asked for {day.isoformat()} on {today.isoformat()}. "
+            "A forecast issued today for a day further out is not the day-ahead "
+            "forecast the model was trained on; for a past day, use the archive."
+        )
+
+    owned = client is None
+    client = client or httpx.Client(timeout=DEFAULT_TIMEOUT)
+
+    try:
+        columns = []
+        for position, city in enumerate(cities):
+            if position:
+                sleep(min_interval)
+            columns.append(
+                _fetch_hourly(
+                    city,
+                    url=FORECAST_URL,
+                    variable=LIVE_VARIABLE,
+                    start=day,
+                    end=day,
+                    client=client,
+                )
+            )
+    finally:
+        if owned:
+            client.close()
+
+    frame = pd.concat(columns, axis=1).sort_index()
+    frame["temperature_c"] = population_weighted(frame, cities)
+    return frame
+
+
+def weather_features(frame: pd.DataFrame, *, base_c: float = 18.0) -> pd.DataFrame:
+    """The three weather columns the design matrix expects, and nothing else.
+
+    Both fetchers return one column per city alongside the aggregate, which is
+    useful for diagnosis and wrong to hand to a model that was never trained on
+    them. Narrowing here — rather than at each call site — means a caller cannot
+    forget, and means the column set has one definition instead of several that
+    slowly disagree.
+    """
+    temperature = frame["temperature_c"]
+    return degree_days(temperature, base_c=base_c).join(temperature)[
+        ["temperature_c", "hdd", "cdd"]
+    ]
 
 
 def population_weighted(frame: pd.DataFrame, cities: tuple[City, ...] = CITIES) -> pd.Series:

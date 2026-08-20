@@ -19,13 +19,17 @@ import respx
 from powerforecast.data.weather import (
     ARCHIVE_URL,
     CITIES,
+    FORECAST_URL,
     FORECAST_VARIABLE,
+    LIVE_VARIABLE,
     City,
     WeatherError,
     degree_days,
     fetch_all_cities,
     fetch_city,
+    fetch_live_all_cities,
     population_weighted,
+    weather_features,
 )
 
 ISTANBUL = CITIES[0]
@@ -174,3 +178,87 @@ def test_base_temperature_can_be_changed() -> None:
 
     assert degree_days(temperature, base_c=22.0)["hdd"].iloc[0] == pytest.approx(2.0)
     assert degree_days(temperature, base_c=18.0)["cdd"].iloc[0] == pytest.approx(2.0)
+
+
+# --------------------------------------------------------------------------- #
+# The live endpoint, used only for a delivery day that has not happened yet
+# --------------------------------------------------------------------------- #
+
+
+def _live_response(hours: int = 24, start: str = "2026-07-02T00:00") -> httpx.Response:
+    times = pd.date_range(start, periods=hours, freq="h").strftime("%Y-%m-%dT%H:%M").tolist()
+    return httpx.Response(
+        200,
+        json={"hourly": {"time": times, LIVE_VARIABLE: [20.0] * hours}},
+    )
+
+
+@respx.mock
+def test_live_fetch_asks_the_forecast_endpoint_for_the_plain_variable() -> None:
+    """Train and serve must read the same quantity from two sides of the day.
+
+    Training reads `temperature_2m_previous_day1` from the archive: the forecast
+    for day D issued on D-1. Serving runs on D-1 and reads the live run for D,
+    which is that same forecast before it became a record. Reading anything else
+    here would put a different distribution in front of the model at serving
+    time than the one it was fitted on.
+    """
+    route = respx.get(FORECAST_URL).mock(return_value=_live_response())
+
+    fetch_live_all_cities(
+        date(2026, 7, 2), cities=(ISTANBUL,), sleep=lambda _: None, today=date(2026, 7, 1)
+    )
+
+    params = route.calls[0].request.url.params
+    assert params["hourly"] == LIVE_VARIABLE
+    assert params["start_date"] == params["end_date"] == "2026-07-02"
+    assert params["timezone"] == "UTC"
+
+
+@respx.mock
+def test_live_fetch_refuses_a_day_that_is_not_the_next_one() -> None:
+    """A forecast issued today for D+5 is not a day-ahead forecast.
+
+    The endpoint would answer, the columns would fill and the service would
+    return numbers — with an error larger than the backtest ever suggested and
+    nothing to indicate why. Refusing is the only way that stays visible.
+    """
+    respx.get(FORECAST_URL).mock(return_value=_live_response())
+
+    for day in (date(2026, 7, 6), date(2026, 7, 1), date(2026, 6, 30)):
+        with pytest.raises(WeatherError, match="next delivery day"):
+            fetch_live_all_cities(
+                day, cities=(ISTANBUL,), sleep=lambda _: None, today=date(2026, 7, 1)
+            )
+
+
+@respx.mock
+def test_live_fetch_aggregates_cities_like_the_archive_does() -> None:
+    respx.get(FORECAST_URL).mock(return_value=_live_response())
+
+    frame = fetch_live_all_cities(
+        date(2026, 7, 2), cities=CITIES[:3], sleep=lambda _: None, today=date(2026, 7, 1)
+    )
+
+    assert "temperature_c" in frame.columns
+    assert len(frame) == 24
+    assert frame["temperature_c"].notna().all()
+
+
+def test_weather_features_narrows_to_what_the_model_was_trained_on() -> None:
+    """Per-city columns are for diagnosis; handing them to the model is a mismatch."""
+    index = pd.date_range("2026-07-02", periods=3, freq="h", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "istanbul": [10.0, 20.0, 30.0],
+            "izmir": [12.0, 22.0, 32.0],
+            "temperature_c": [11.0, 21.0, 31.0],
+        },
+        index=index,
+    )
+
+    features = weather_features(frame)
+
+    assert list(features.columns) == ["temperature_c", "hdd", "cdd"]
+    assert features["hdd"].tolist() == [7.0, 0.0, 0.0]
+    assert features["cdd"].tolist() == [0.0, 3.0, 13.0]
