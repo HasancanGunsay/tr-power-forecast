@@ -12,11 +12,11 @@
 > **27% on MAE** and **29% on RMSE** — and still wins by 25% and 27% against that
 > forecast with its systematic bias already corrected, which is the harder comparison.
 >
-> **That is a backtest claim, and the deployed configuration does not yet match it.**
-> The winning variant applies a bias correction that is not part of the served model, and
-> the first genuine out-of-sample check — 30 delivery days produced by the daily job —
-> puts the deployed model *behind* the published plan. Measured, reported, and being
-> worked on: see [Running unattended, and checking afterwards](#running-unattended-and-checking-afterwards).
+> **That is a backtest claim, and the deployed configuration does not match it.**
+> The winning variant's bias correction is estimated over the whole evaluation period, so
+> it is a competitor rather than a component. Walked forward honestly, the served model
+> beats the plan by **19.8%** and a deployable correction adds **0.7%** — measured and
+> reported: see [Running unattended, and checking afterwards](#running-unattended-and-checking-afterwards).
 
 ![Learned models against the published plan](reports/figures/model_comparison.png)
 
@@ -302,6 +302,10 @@ uv run python -m powerforecast.analysis.figures
 uv run python -m powerforecast.analysis.experiment
 ```
 
+```bash
+uv run python -m powerforecast.analysis.bias_correction
+```
+
 The experiment refits four model variants across 31 folds and takes a few minutes.
 
 ## Serving
@@ -410,21 +414,47 @@ Two things make this more than a scoreboard, both recorded in
 
 ### What the out-of-sample check actually says
 
-A model trained to 2026-06-30 and used for the 30 delivery days from 5 July to 3 August:
+A model fitted to 2026-01-31 and walked forward over every delivery day to 3 August —
+4,439 hours nobody chose, with no refit:
 
-| | MAE | RMSE | MAPE |
-|---|---|---|---|
-| deployed model (no bias correction) | 1,165 | 1,498 | 2.54% |
-| official plan, same hours | 1,036 | — | — |
+| forecast | MAE | RMSE |
+|---|---|---|
+| + hourly offset, **median** | **907.8** | 1,223.4 |
+| + constant offset, median | 909.9 | **1,217.7** |
+| raw, no correction | 914.5 | 1,233.6 |
+| + hourly offset, mean | 918.1 | 1,230.4 |
+| + constant offset, mean | 923.8 | 1,230.9 |
+| published plan | 1,140.5 | 1,530.8 |
 
-**Mean daily skill against the plan: −0.36.** On this window the deployed configuration
-is *worse* than the operator's own forecast, and the drift check reports `DEGRADED`
-(skill 0.046 → −0.265). The error concentrates on weekends — Saturday MAE 1,667, Sunday
-1,507, both systematically over-forecasting — against roughly 800–1,270 on weekdays.
+**The raw model beats the plan by 19.8% out of sample**, and a deployable bias
+correction — rolling window, availability cutoff enforced in code — is worth a further
+**0.7%**. Not 27%. The backtest's corrected variant looks stronger because its
+correction is estimated over the whole period and therefore sees the future; that is
+what makes it a good competitor and a bad component.
 
-The headline 27% figure above comes from the backtest's **bias-corrected** variant,
-which is not what is deployed. Closing that gap is the outstanding work; until it is
-closed, no claim is made that the deployed model beats the plan.
+Two results worth more than the 0.7%:
+
+- **The mean makes MAE worse and RMSE better.** Shifting by the mean error minimises
+  squared error; shifting by the *median* minimises absolute error. Correcting with the
+  mean optimises the metric this project does not headline.
+- **Finer grouping loses.** Hour-by-weekday offsets score 979 against 912 for no
+  correction at all: a 28-day window gives 28 samples per hour but four per
+  hour-and-weekday cell. Measured, then not shipped — see
+  [ADR 0008](docs/decisions/0008-deployable-bias-correction.md).
+
+**Correction to an earlier claim.** A first check on a single 30-day window in July put
+the deployed model *behind* the plan and was reported that way. Over the longer window
+it does not hold — July is hard for this model and easy for the plan. One month was not
+a verdict.
+
+What does still hold: the error concentrates on weekends, and the correction does not
+touch it (Saturday −3.9%, Sunday −7.2%, against +5.7% to +10.5% Wednesday to Friday).
+That is a modelling problem, and it is where the next real gain is.
+
+Training cut-off turns out to matter more than any of this. On one fixed July window,
+MAE by cut-off: 31 Jan **1,057**, 31 Mar 1,136, 31 May **1,764**, 30 Jun 1,134 —
+non-monotonic, a 67% swing, and not yet explained. Retraining cadence is a first-order
+decision here, not housekeeping.
 
 ## Design decisions
 

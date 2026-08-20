@@ -24,6 +24,7 @@ history of a mistake is part of what makes the log useful.
 | [0005](0005-weather-and-fair-comparison.md) | Archived weather forecasts, and correcting our own bias | Accepted |
 | [0006](0006-model-store.md) | A model store, not a pickle | Accepted |
 | [0007](0007-forecast-store-and-drift.md) | Recording forecasts, and how drift is judged | Accepted |
+| [0008](0008-deployable-bias-correction.md) | A bias correction that can be deployed, and what it is worth | Accepted |
 
 ## Template
 

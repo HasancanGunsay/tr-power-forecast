@@ -95,6 +95,14 @@ ran.
 * Every model that ever produced a stored forecast must keep its card, or its
   hours can no longer be classified. Missing cards are treated as out-of-sample
   and logged, which errs toward keeping evidence rather than discarding it.
+* **Corrected on 2026-08-20, see [ADR 0008](0008-deployable-bias-correction.md).**
+  The paragraph below reports a single 30-day window and reads as a verdict on
+  the deployed model. It is not one. Over February–August the raw model beats the
+  published plan by 19.8%; July is a hard month for this model and an easy one
+  for the plan. The measurement stands, the generalisation does not. It is left
+  here rather than edited away, because a decision log that quietly revises its
+  own conclusions is worth less than one that shows them being revised.
+
 * **A genuinely out-of-sample check has now been run, and it is not flattering.**
   A model trained to 2026-06-30 and used for the 30 delivery days from 5 July to
   3 August scores MAE 1,165 against the published plan's 1,036 — mean daily skill
