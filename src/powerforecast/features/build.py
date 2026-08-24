@@ -44,6 +44,7 @@ class FeatureSpec:
     target_lags: tuple[int, ...] = DEFAULT_TARGET_LAGS
     origin_windows: tuple[int, ...] = DEFAULT_ORIGIN_WINDOWS
     origin_offsets: tuple[int, ...] = (0, 24)
+    include_trend: bool = False
     include_weather: bool = True
     include_holidays: bool = True
     include_load_plan: bool = False
@@ -127,7 +128,9 @@ def build_design_matrix(
     for name in spec.extra:
         columns.append(panel[name])
 
-    features = calendar_features(index, tz=spec.tz).join(pd.concat(columns, axis=1))
+    features = calendar_features(index, tz=spec.tz, include_trend=spec.include_trend).join(
+        pd.concat(columns, axis=1)
+    )
 
     if spec.include_holidays:
         # Also safe by construction: a calendar for next year is known this year.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from powerforecast.evaluation.metrics import bias as metrics_bias
 from powerforecast.monitoring.verify import (
     daily_summary,
     detect_drift,
@@ -79,6 +80,25 @@ def test_only_hours_with_an_actual_are_verified():
 
     assert len(verified) == 72
     assert verified["actual_mwh"].notna().all()
+
+
+def test_bias_has_one_sign_convention_across_the_repository():
+    """Two conventions under one word produced two wrong sentences once already.
+
+    `residual = actual - forecast` (positive = forecast came in low).
+    `bias` = `metrics.bias` (positive = forecast runs high). Opposites, and the
+    test pins them to each other so a future edit cannot quietly flip one.
+    """
+    # Forecast deliberately below actual: residual positive, bias negative.
+    forecasts, panel = scenario(days=4)
+    forecasts["forecast_mwh"] = panel["consumption_mwh"] - 500.0
+
+    verified = verify(forecasts, panel)
+    daily = daily_summary(verified)
+
+    assert (verified["residual"] == 500.0).all()
+    assert (daily["bias"] == -500.0).all()
+    assert daily["bias"].iloc[0] == metrics_bias(verified["actual_mwh"], verified["forecast_mwh"])
 
 
 def test_verification_carries_the_plan_as_a_control():

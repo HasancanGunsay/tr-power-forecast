@@ -9,14 +9,15 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 > **Status: in progress.** In backtest, the best model beats the published forecast by
-> **27% on MAE** and **29% on RMSE** — and still wins by 25% and 27% against that
+> **34% on MAE** and **36% on RMSE** — and still wins by 31% and 34% against that
 > forecast with its systematic bias already corrected, which is the harder comparison.
 >
-> **That is a backtest claim, and the deployed configuration does not match it.**
-> The winning variant's bias correction is estimated over the whole evaluation period, so
-> it is a competitor rather than a component. Walked forward honestly, the served model
-> beats the plan by **19.8%** and a deployable correction adds **0.7%** — measured and
-> reported: see [Running unattended, and checking afterwards](#running-unattended-and-checking-afterwards).
+> **That is a backtest claim; the deployed model carries no bias correction.** The
+> winning variant's correction is estimated over the whole evaluation period, so it is a
+> competitor rather than a component — and a rolling, deployable version was built,
+> measured, and **rejected**: it makes things worse. Walked forward honestly the served
+> model still beats the plan by **19.8%**. See
+> [Running unattended, and checking afterwards](#running-unattended-and-checking-afterwards).
 
 ![Learned models against the published plan](reports/figures/model_comparison.png)
 
@@ -27,17 +28,21 @@ every model refitted from scratch each fold, every forecast scored on the same h
 
 | Forecast | MAE (MWh) | RMSE (MWh) | MAPE | Bias |
 |---|---|---|---|---|
-| **LightGBM + weather + hourly bias** | **914** | **1,251** | **2.3%** | −1 |
-| LightGBM + weather + constant bias | 921 | 1,258 | 2.4% | −1 |
-| LightGBM + weather | 931 | 1,270 | 2.4% | −177 |
-| LightGBM | 977 | 1,320 | 2.5% | −103 |
-| Ridge + weather | 1,122 | 1,555 | 2.9% | −22 |
-| Ridge | 1,160 | 1,613 | 3.0% | −18 |
+| **LightGBM + weather + hourly bias** | **831** | **1,148** | **2.1%** | −1 |
+| LightGBM + weather + constant bias | 845 | 1,162 | 2.1% | −1 |
+| **LightGBM + weather** *(deployed)* | **890** | **1,221** | 2.2% | −375 |
+| LightGBM | 919 | 1,261 | 2.3% | −214 |
+| Ridge + weather | 1,128 | 1,564 | 2.9% | −162 |
+| Ridge | 1,159 | 1,611 | 3.0% | +4 |
 | Published plan **+ hourly bias** | 1,213 | 1,744 | 3.1% | 0 |
 | Published plan **+ constant bias** | 1,221 | 1,753 | 3.1% | 0 |
 | Published plan (raw) | 1,260 | 1,786 | 3.2% | −338 |
 | Seasonal naive, 168h | 2,077 | 3,340 | 5.5% | −53 |
 | Seasonal naive, 48h | 3,142 | 4,409 | 8.1% | −11 |
+
+The row marked *deployed* is the one the service actually serves: no bias correction,
+because a deployable version of that correction was built and measured and made things
+worse ([ADR 0009](docs/decisions/0009-no-monotonic-trend-feature.md)).
 
 ### The comparison is against the corrected plan, not the raw one
 
@@ -49,6 +54,12 @@ could remove — so `plan + hourly bias` is the number to beat, not `plan`.
 The same correction is applied to our own best model, for the same reason in reverse.
 Correcting only the competitor would rig the comparison in the opposite direction to the
 usual one, and our model's bias was larger than the corrected plan's.
+
+> **Numbers in the three sections below predate
+> [ADR 0009](docs/decisions/0009-no-monotonic-trend-feature.md)**, which removed a
+> monotonic trend feature and moved the headline from 914 to 831. They are left as they
+> were measured, because they narrate a diagnosis in the order it happened and rewriting
+> them would turn a record into a claim. The current figures are the table above.
 
 ### How the holiday feature was found, and what it was worth
 
@@ -415,46 +426,53 @@ Two things make this more than a scoreboard, both recorded in
 ### What the out-of-sample check actually says
 
 A model fitted to 2026-01-31 and walked forward over every delivery day to 3 August —
-4,439 hours nobody chose, with no refit:
+4,439 hours nobody chose, with no refit. **The served model beats the published plan by
+19.8%**, and every bias correction tried on top of it makes things worse:
 
 | forecast | MAE | RMSE |
 |---|---|---|
-| + hourly offset, **median** | **907.8** | 1,223.4 |
-| + constant offset, median | 909.9 | **1,217.7** |
-| raw, no correction | 914.5 | 1,233.6 |
-| + hourly offset, mean | 918.1 | 1,230.4 |
-| + constant offset, mean | 923.8 | 1,230.9 |
+| raw, no correction *(deployed)* | **915.2** | **1,236.0** |
+| + constant offset, median | 937.5 | 1,251.4 |
+| + hourly offset, median | 938.6 | 1,256.9 |
+| + hourly offset, mean | 939.4 | 1,253.9 |
+| + constant offset, mean | 946.7 | 1,254.9 |
 | published plan | 1,140.5 | 1,530.8 |
 
-**The raw model beats the plan by 19.8% out of sample**, and a deployable bias
-correction — rolling window, availability cutoff enforced in code — is worth a further
-**0.7%**. Not 27%. The backtest's corrected variant looks stronger because its
-correction is estimated over the whole period and therefore sees the future; that is
-what makes it a good competitor and a bad component.
+A rolling, leak-free bias correction was built and tested precisely because the
+backtest's best variant uses one. It is not deployed, and the reason is measurable
+rather than arguable: over 181 delivery days the correlation between the offset it
+proposes and the day's realised median error is **−0.024**, and it pushes the forecast
+the *wrong way* on **43%** of days. There is no signal there to use.
 
-Two results worth more than the 0.7%:
-
-- **The mean makes MAE worse and RMSE better.** Shifting by the mean error minimises
-  squared error; shifting by the *median* minimises absolute error. Correcting with the
-  mean optimises the metric this project does not headline.
-- **Finer grouping loses.** Hour-by-weekday offsets score 979 against 912 for no
-  correction at all: a 28-day window gives 28 samples per hour but four per
-  hour-and-weekday cell. Measured, then not shipped — see
-  [ADR 0008](docs/decisions/0008-deployable-bias-correction.md).
+It had looked worth +0.7% until a monotonic trend feature was removed from the design
+matrix — that feature was creating the persistent level error the correction had been
+repairing. Both halves of that story are in
+[ADR 0009](docs/decisions/0009-no-monotonic-trend-feature.md); it is also what took the
+backtest headline from 914 to 831.
 
 **Correction to an earlier claim.** A first check on a single 30-day window in July put
-the deployed model *behind* the plan and was reported that way. Over the longer window
-it does not hold — July is hard for this model and easy for the plan. One month was not
-a verdict.
+the deployed model *behind* the plan and was reported that way. It does not survive the
+longer window — July is hard for this model and easy for the plan. One month was not a
+verdict.
 
-What does still hold: the error concentrates on weekends, and the correction does not
-touch it (Saturday −3.9%, Sunday −7.2%, against +5.7% to +10.5% Wednesday to Friday).
-That is a modelling problem, and it is where the next real gain is.
+**A second correction, from the same mistake.** The weekend was reported as where the
+error concentrates. That too came from one walk-forward with a fixed cut-off. On the
+backtest — 21,873 hours, refit every fold — the weekend is the model's **best** stretch
+(Saturday MAE 757, Sunday 815, both with the highest skill against the plan) and Monday
+its worst (1,049). The real concentration is **weekday daytime**: 11:00–17:00 carries MAE
+1,120–1,310 with the forecast running low by up to 811 MWh.
 
-Training cut-off turns out to matter more than any of this. On one fixed July window,
-MAE by cut-off: 31 Jan **1,057**, 31 Mar 1,136, 31 May **1,764**, 30 Jun 1,134 —
-non-monotonic, a 67% swing, and not yet explained. Retraining cadence is a first-order
-decision here, not housekeeping.
+The rule that follows, having now made the same error twice: **where a model fails is a
+question for the backtest, not for one walk-forward.** One window is a measurement; the
+backtest is the distribution.
+
+What does hold: the forecast **runs low almost everywhere** (−215 to −490 MWh by
+weekday), consistent with demand growth a tree cannot extrapolate. The principled fix —
+predicting relative to the recent observable level so the tree never extrapolates — was
+built and backtested, and is **worse** (MAE 922 against 890). See
+[ADR 0009](docs/decisions/0009-no-monotonic-trend-feature.md). Where the remaining error
+lives is an open question again, which is a more honest place to be than the previous
+answer.
 
 ## Design decisions
 

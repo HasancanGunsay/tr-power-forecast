@@ -1,7 +1,15 @@
 # 0008 — A bias correction that can be deployed, and what it is worth
 
-**Status:** Accepted
+**Status:** Superseded by [0009](0009-no-monotonic-trend-feature.md)
 **Date:** 2026-08-20
+
+> **Superseded the same day.** Every measurement here was taken while the design
+> matrix still contained `years_elapsed`. Removing that feature removed the
+> persistent level error this correction was repairing, and re-measured without
+> it, every variant is **worse than no correction**. The reasoning below about
+> availability, the mean-versus-median distinction and the cost of fine
+> grouping all still hold; the adoption does not. The record is left standing
+> rather than rewritten — see ADR 0009 for what replaced it.
 
 ## Context
 

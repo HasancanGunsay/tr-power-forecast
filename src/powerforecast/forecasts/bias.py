@@ -1,4 +1,9 @@
-"""A bias correction that could actually be deployed.
+"""A bias correction that could be deployed — and, measured, should not be.
+
+**Status: implemented, tested, not deployed.** The measurement that decided
+that is in ADR 0009 and is summarised below. The module stays because the
+measurement is the point: the next person to propose a rolling bias correction
+should find the answer rather than rebuild the question.
 
 The backtest's headline number uses a correction estimated over the **whole
 evaluation period**, which is a competitor built to be hard to beat rather than a
@@ -39,7 +44,8 @@ The cutoff is computed in code from the origin, not documented and hoped for.
 
 The obvious estimator is the mean error, and it was tried first. It made MAE
 **worse** — 914.5 to 918.1 over 4,439 out-of-sample hours — while nudging RMSE
-down from 1,233.6 to 1,230.4.
+down from 1,233.6 to 1,230.4. (Those figures predate ADR 0009; see the verdict
+below for what happened when the feature set changed underneath them.)
 
 That split is not noise, it is the definition of the two metrics. Shifting a
 forecast by the mean error minimises *squared* error; shifting by the **median**
@@ -73,6 +79,35 @@ for a rejected idea is a maintenance cost with no user.
 This is the same limit reached with the holiday features: the data supports the
 coarse pattern and not the fine one, and the way to tell is to measure rather
 than to reason about which is more expressive.
+
+## The verdict: not deployed
+
+Everything above was measured while the design matrix still contained
+`years_elapsed`, a monotonic trend feature that a tree cannot extrapolate. That
+feature was producing a persistent level error, and this correction was largely
+repairing it.
+
+Removing the feature (ADR 0009) removed the thing being corrected. Re-measured on
+the same 4,439 hours, **every variant is now worse than doing nothing**:
+
+| forecast | MAE |
+|---|---|
+| raw, no correction | **915.2** |
+| + constant offset, median | 937.5 |
+| + hourly offset, median | 938.6 |
+| + hourly offset, mean | 939.4 |
+| + constant offset, mean | 946.7 |
+
+The reason is measurable rather than arguable. Over 181 delivery days, the
+correlation between the offset this estimator proposes and the day's realised
+median error is **-0.024** — indistinguishable from zero — and the correction
+pushes the forecast the *wrong way* on **43%** of days. The proposed offsets have
+a standard deviation of 263 MWh; the realised daily median error has one of 932.
+The estimator is adding a small random number to a large random number.
+
+So: the residual bias carries no information from one month to the next. There is
+nothing here for a rolling correction to find, and a correction that finds
+nothing still costs something.
 
 ## Graceful degradation, stated rather than silent
 

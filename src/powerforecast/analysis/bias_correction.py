@@ -1,4 +1,4 @@
-"""Does a *deployable* bias correction recover the backtest's advantage?
+"""Does a *deployable* bias correction recover the backtest's advantage? (No.)
 
     uv run python -m powerforecast.analysis.bias_correction
 
@@ -19,33 +19,35 @@ Several variants are compared on identical hours, against the published plan.
 Whatever the answer is, it goes in the README: a correction that does not help is
 a result, and a correction adopted without measuring would be a decoration.
 
-The answer, on 4,439 hours from February to August 2026, is that it barely helps
-— and that *which* statistic is used decides the sign:
+The answer, on 4,439 hours from February to August 2026, is **no** — every
+variant is worse than leaving the forecast alone:
 
 | forecast | MAE | RMSE |
 |---|---|---|
-| + hourly offset, **median** | **907.8** | 1,223.4 |
-| + constant offset, **median** | 909.9 | **1,217.7** |
-| raw, no correction | 914.5 | 1,233.6 |
-| + hourly offset, mean | 918.1 | 1,230.4 |
-| + constant offset, mean | 923.8 | 1,230.9 |
+| raw, no correction | **915.2** | **1,236.0** |
+| + constant offset, median | 937.5 | 1,251.4 |
+| + hourly offset, median | 938.6 | 1,256.9 |
+| + hourly offset, mean | 939.4 | 1,253.9 |
+| + constant offset, mean | 946.7 | 1,254.9 |
 | published plan | 1,140.5 | 1,530.8 |
 
-The mean makes MAE worse while improving RMSE, which is exactly what the two
-metrics are defined to do: the mean minimises squared error, the median minimises
-absolute error. Correcting with the mean optimises the metric this project does
-not headline at the cost of the one it does.
+This reverses an earlier reading. Measured while the design matrix still held
+`years_elapsed` — a monotonic trend a tree cannot extrapolate — the median-based
+correction was worth +0.7%. Removing that feature (ADR 0009) removed the
+persistent level error the correction had been repairing, and with the cause gone
+the residual bias carries no information: over 181 delivery days the correlation
+between the proposed offset and the day's realised median error is **-0.024**,
+and the correction pushes the wrong way on **43%** of days.
 
-Under one percent is the honest size of the win. The gap between the deployed
-model and the backtest's corrected variant was never mostly a bias problem — the
-backtest's correction looks powerful *because* it sees the whole period, not
-because bias correction is powerful.
+Two things this run does settle, and they outlast the reversal:
 
-The other thing this run settles: **raw already beats the published plan by 19.8%
-over these six months.** An earlier check on a single 30-day window in July had
-put the deployed model behind the plan, and that reading does not survive a
-longer window. July is a hard month for this model and an easy one for the plan;
-one month is not a verdict.
+* **The mean and the median optimise different metrics.** Shifting by the mean
+  error minimises squared error; shifting by the median minimises absolute error.
+  Whichever is chosen should follow the metric being reported, not habit.
+* **Raw beats the published plan by 19.8% out of sample.** An earlier check on a
+  single 30-day July window had put the deployed model behind the plan. That
+  reading does not survive a longer window — July is hard for this model and easy
+  for the plan. One month is not a verdict.
 """
 
 from __future__ import annotations

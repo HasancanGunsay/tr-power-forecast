@@ -230,7 +230,20 @@ def test_weekend_flag_matches_the_local_date() -> None:
 def test_trend_is_measured_in_years_from_the_start() -> None:
     index = pd.DatetimeIndex(pd.date_range("2021-01-01", periods=24 * 400, freq="h", tz="UTC"))
 
-    features = calendar_features(index)
+    features = calendar_features(index, include_trend=True)
 
     assert features["years_elapsed"].iloc[0] == pytest.approx(0.0)
     assert features["years_elapsed"].iloc[-1] == pytest.approx(1.09, abs=0.02)
+
+
+def test_the_trend_is_off_by_default() -> None:
+    """A monotonic feature is one every prediction row sits outside of.
+
+    Trees cannot extrapolate, so all future rows land on one side of the highest
+    split and inherit whatever the last stretch of training happened to look
+    like. Measured: with training ending four days after Kurban Bayrami, July MAE
+    was 1,764 with the feature and 1,076 without. See ADR 0009.
+    """
+    index = pd.DatetimeIndex(pd.date_range("2021-01-01", periods=48, freq="h", tz="UTC"))
+
+    assert "years_elapsed" not in calendar_features(index).columns

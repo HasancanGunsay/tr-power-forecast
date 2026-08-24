@@ -74,7 +74,7 @@ from pathlib import Path
 import pandas as pd
 
 from powerforecast.data.panel import load_panel
-from powerforecast.evaluation.metrics import ErrorSummary, summarize
+from powerforecast.evaluation.metrics import ErrorSummary, bias, summarize
 from powerforecast.features.availability import LOCAL_TZ
 from powerforecast.forecasts.store import latest_run, read_forecasts
 from powerforecast.models.persistence import ModelStoreError, read_card
@@ -140,10 +140,20 @@ def verify(
     closer it ran to the present.
 
     Returns a frame indexed by delivery hour with the forecast, the actual, the
-    signed error, an `in_sample` flag, and — where the operator published one —
-    the plan and its error. The plan columns are what make drift detection
-    possible; `in_sample` is what stops a fitted hour being counted as a
-    forecast. See the module docstring for both.
+    signed **residual**, an `in_sample` flag, and — where the operator published
+    one — the plan and its residual.
+
+    A note on signs, because this repository once held both conventions at once.
+    `residual = actual - forecast`, so a positive residual means the forecast
+    came in **low**. Reported `bias` uses the opposite convention, matching
+    `evaluation.metrics.bias`: positive means the forecast **runs high**. Two
+    columns, two meanings, and the names now differ so neither can be read as
+    the other. The earlier collision — a column called `error` being reported
+    under the heading `bias` — produced two confidently wrong sentences before
+    anyone noticed, which is the whole argument for naming things apart.
+
+    The plan columns are what make drift detection possible; `in_sample` is what
+    stops a fitted hour being counted as a forecast. See the module docstring.
     """
     if forecasts.empty:
         return _empty_verification()
@@ -160,13 +170,13 @@ def verify(
         return _empty_verification()
 
     verified["actual_mwh"] = actual.loc[verified.index]
-    verified["error"] = verified["actual_mwh"] - verified["forecast_mwh"]
-    verified["abs_error"] = verified["error"].abs()
+    verified["residual"] = verified["actual_mwh"] - verified["forecast_mwh"]
+    verified["abs_error"] = verified["residual"].abs()
 
     if plan in panel.columns:
         verified["plan_mwh"] = panel[plan].reindex(verified.index)
-        verified["plan_error"] = verified["actual_mwh"] - verified["plan_mwh"]
-        verified["plan_abs_error"] = verified["plan_error"].abs()
+        verified["plan_residual"] = verified["actual_mwh"] - verified["plan_mwh"]
+        verified["plan_abs_error"] = verified["plan_residual"].abs()
 
     verified["delivery_date"] = pd.DatetimeIndex(verified.index).tz_convert(LOCAL_TZ).date
     verified["in_sample"] = _in_sample_flags(verified, directory=model_directory)
@@ -196,8 +206,11 @@ def daily_summary(verified: pd.DataFrame) -> pd.DataFrame:
             "delivery_date": day,
             "hours": len(group),
             "MAE": float(group["abs_error"].mean()),
-            "RMSE": float((group["error"] ** 2).mean() ** 0.5),
-            "bias": float(group["error"].mean()),
+            "RMSE": float((group["residual"] ** 2).mean() ** 0.5),
+            # Same convention as `evaluation.metrics.bias`: positive means the
+            # forecast runs high. Computed through that function rather than
+            # negated by hand, so the two can never drift apart.
+            "bias": bias(group["actual_mwh"], group["forecast_mwh"]),
         }
         if "plan_abs_error" in group and group["plan_abs_error"].notna().any():
             plan_mae = float(group["plan_abs_error"].mean())
@@ -390,7 +403,7 @@ def _insufficient(detail: str, *, recent_hours: int = 0, baseline_hours: int = 0
 
 def _empty_verification() -> pd.DataFrame:
     return pd.DataFrame(
-        columns=["forecast_mwh", "actual_mwh", "error", "abs_error", "delivery_date"],
+        columns=["forecast_mwh", "actual_mwh", "residual", "abs_error", "delivery_date"],
         index=pd.DatetimeIndex([], tz="UTC", name="timestamp"),
     )
 
