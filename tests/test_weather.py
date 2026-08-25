@@ -211,8 +211,13 @@ def test_live_fetch_asks_the_forecast_endpoint_for_the_plain_variable() -> None:
 
     params = route.calls[0].request.url.params
     assert params["hourly"] == LIVE_VARIABLE
-    assert params["start_date"] == params["end_date"] == "2026-07-02"
     assert params["timezone"] == "UTC"
+    # Two UTC days for one local day. Türkiye is UTC+3, so the local delivery day
+    # begins at 21:00 UTC on the day before it; asking for the single UTC date
+    # returns 21 of its 24 hours. Caught by running the daily job for a real
+    # tomorrow, which refused the day with "3 of 24 hours missing".
+    assert params["start_date"] == "2026-07-01"
+    assert params["end_date"] == "2026-07-02"
 
 
 @respx.mock

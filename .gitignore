@@ -60,3 +60,6 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Scheduled-run logs: local, noisy, and regenerated every day.
+logs/

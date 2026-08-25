@@ -2,9 +2,15 @@
 
     uv run python -m powerforecast.jobs.daily_forecast
 
-Run it before the 12:30 bid deadline. Four steps:
+Run it before the 12:30 bid deadline. Three steps:
 
-    refresh the data  ->  fetch tomorrow's weather  ->  forecast  ->  store
+    fetch tomorrow's weather  ->  forecast  ->  store
+
+It reads the panel from disk and does **not** ingest. Ingestion is a separate job
+with separate failure modes — credentials, a cumulative API quota, a platform
+that is sometimes simply down — and folding it in here would mean one broken
+thing stops two. `scripts/daily.ps1` runs them in order; the scheduler is the
+orchestrator, not this file.
 
 Nothing here is clever. That is the point: this is the first part of the system
 that runs without a person watching, and unattended code is judged by how it

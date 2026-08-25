@@ -225,6 +225,18 @@ def fetch_live_all_cities(
     why. A day-ahead model must be fed a day-ahead forecast, so anything else is
     refused here rather than discovered later.
 
+    ## Two UTC days, one local day
+
+    The request covers `day - 1` **and** `day` in UTC, and that is not caution.
+    A local delivery day begins at 21:00 UTC on the day before it (Türkiye is
+    UTC+3), so asking Open-Meteo for the single UTC date returns 24 hours of
+    which only 21 belong to the local day — the first three are missing and the
+    last three belong to the day after.
+
+    Found by running the daily job for a real tomorrow: it refused the day with
+    "3 of 24 hours missing". The caller reindexes onto the local day's hours, so
+    the extra hours cost one request each and nothing else.
+
     Args:
         day: The delivery day. Must be exactly one day after `today`.
         today: Injectable clock. Tests must not depend on when they run.
@@ -254,7 +266,7 @@ def fetch_live_all_cities(
                     city,
                     url=FORECAST_URL,
                     variable=LIVE_VARIABLE,
-                    start=day,
+                    start=day - timedelta(days=1),
                     end=day,
                     client=client,
                 )

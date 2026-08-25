@@ -27,6 +27,7 @@ history of a mistake is part of what makes the log useful.
 | [0008](0008-deployable-bias-correction.md) | A bias correction that can be deployed, and what it is worth | Superseded by [0010](0010-bias-correction-and-retraining.md) |
 | [0009](0009-no-monotonic-trend-feature.md) | Removing the linear trend, and what it had been hiding | Accepted |
 | [0010](0010-bias-correction-and-retraining.md) | The bias correction works, and what it depends on | Accepted |
+| [0011](0011-scheduled-retraining.md) | Scheduled retraining, with a gate | Accepted |
 
 ## Template
 

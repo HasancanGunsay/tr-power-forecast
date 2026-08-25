@@ -216,3 +216,59 @@ def test_refetched_values_win_over_stored_ones(tmp_path) -> None:
 
 def test_reading_an_absent_series_gives_an_empty_frame(tmp_path) -> None:
     assert read_raw(CONSUMPTION, root=tmp_path).empty
+
+
+# --------------------------------------------------------------------------- #
+# Advancing the current month — the bug that only appears under a scheduler
+# --------------------------------------------------------------------------- #
+
+
+def test_recent_months_are_anchored_on_the_requested_end() -> None:
+    """Anchored on `end`, not on today, so a historical backfill stays reproducible."""
+    from powerforecast.data.backfill import _recent_months
+
+    assert _recent_months(date(2026, 8, 25), 2) == {"2026-07", "2026-08"}
+    assert _recent_months(date(2026, 1, 5), 2) == {"2025-12", "2026-01"}
+    assert _recent_months(date(2026, 8, 25), 0) == set()
+
+
+def test_the_trailing_months_are_refetched_even_though_they_are_on_disk(monkeypatch) -> None:
+    """A month file written today holds a month that has not finished happening.
+
+    Skipping it because the file exists means the data never advances again: the
+    first run of the month writes a few days and every run after it decides there
+    is nothing to do. Loud downstream — tomorrow's lags go missing and the daily
+    job refuses the day — but the cause is nowhere near the symptom.
+    """
+    from powerforecast.data import backfill
+
+    requested: list[str] = []
+
+    monkeypatch.setattr(
+        backfill,
+        "stored_months",
+        # April is in the set because a *local* May chunk touches the UTC month
+        # before it — a local month begins at 21:00 UTC on the last day of the
+        # previous one (ADR 0003). Leaving it out makes May look unstored.
+        lambda spec: {"2026-04", "2026-05", "2026-06", "2026-07", "2026-08"},
+    )
+    monkeypatch.setattr(
+        backfill,
+        "fetch_chunk",
+        lambda client, spec, s, e: requested.append(f"{s:%Y-%m}") or pd.DataFrame(),
+    )
+    monkeypatch.setattr(backfill, "write_raw", lambda frame, spec: None)
+
+    class _Client:
+        interval = 1.0  # only the progress line touches the client here
+
+    backfill.backfill_series(
+        client=_Client(),  # type: ignore[arg-type]
+        spec=CONSUMPTION,
+        start=date(2026, 5, 1),
+        end=date(2026, 8, 25),
+        refresh=False,
+    )
+
+    # May and June are finished and stay skipped; July and August are re-fetched.
+    assert requested == ["2026-07", "2026-08"]

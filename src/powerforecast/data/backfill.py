@@ -10,6 +10,17 @@ unless `--refresh` is given — the platform's quota is cumulative across
 endpoints, so re-downloading data we already hold is not merely wasteful, it is
 what pushes the next request into a 429.
 
+**With one exception, and it matters for anything scheduled.** A month file
+written today holds a month that has not happened yet. Skipping it because the
+file exists would mean the data never advances again: the first run of the month
+writes a few days, and every run after that decides there is nothing to do. The
+failure is loud downstream — the lags for tomorrow go missing and the daily job
+refuses the day — but the cause is nowhere near the symptom.
+
+So the trailing `RECENT_MONTHS` are always re-fetched regardless of what is on
+disk. `write_raw` merges rather than replaces (ADR 0003), so re-fetching is safe
+and costs a handful of requests a day.
+
 Deliberately **does not** abort on a data-quality problem. `data/raw/` holds what
 the API actually returned, gaps included; discovering later that a month is short
 is far better than a backfill that stops halfway and leaves a partial dataset
@@ -40,6 +51,12 @@ from powerforecast.data.ingest import (
 
 DEFAULT_START = date(2021, 1, 1)
 
+# How many trailing months to re-fetch even when their files already exist. Two
+# rather than one because a delivery day early in a month needs the tail of the
+# previous one, and because published series get revised for a while after the
+# fact.
+RECENT_MONTHS = 2
+
 # Bulk downloads get a wider default gap than interactive use. Being throttled
 # mid-backfill costs far more than the extra seconds spent avoiding it.
 BACKFILL_INTERVAL = 1.0
@@ -52,9 +69,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--end",
         type=date.fromisoformat,
-        # Yesterday: today's series is still being published and would land as a
-        # short final day that never gets refilled.
-        default=date.today() - timedelta(days=1),
+        # Today, not yesterday. The original reason for stopping a day short was
+        # that a partial final day would be written once and never refilled —
+        # true while a stored month was skipped forever after. `RECENT_MONTHS`
+        # removed that, so today's partial day is completed by tomorrow's run.
+        #
+        # And it has to be today: the forecast origin for tomorrow is 11:00
+        # *today*, so a panel ending yesterday leaves every origin-relative
+        # feature null and the daily job refuses the day. Which is exactly how
+        # this was found.
+        default=date.today(),
     )
     parser.add_argument(
         "--series",
@@ -74,6 +98,21 @@ def selected_series(names: list[str] | None) -> tuple[SeriesSpec, ...]:
     if not names:
         return ALL_SERIES
     return tuple(spec for spec in ALL_SERIES if spec.name in names)
+
+
+def _recent_months(end: date, count: int) -> set[str]:
+    """The trailing months that must be re-fetched even if a file exists.
+
+    Anchored on `end` rather than on today, so a historical backfill stays
+    reproducible: asking for data up to a date in 2023 re-fetches the months
+    around that date, not the months around whenever the command happens to run.
+    """
+    months = set()
+    cursor = date(end.year, end.month, 1)
+    for _ in range(max(count, 0)):
+        months.add(f"{cursor:%Y-%m}")
+        cursor = (cursor - timedelta(days=1)).replace(day=1)
+    return months
 
 
 def _months_covered(start: date, end: date) -> set[str]:
@@ -100,9 +139,10 @@ def backfill_series(
     end: date,
     *,
     refresh: bool,
+    recent_months: int = RECENT_MONTHS,
 ) -> pd.DataFrame:
     """Download and store one series month by month, returning what was fetched."""
-    on_disk = set() if refresh else stored_months(spec)
+    on_disk = set() if refresh else stored_months(spec) - _recent_months(end, recent_months)
     fetched: list[pd.DataFrame] = []
 
     for chunk_start, chunk_end in month_chunks(start, end):

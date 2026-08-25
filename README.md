@@ -412,6 +412,33 @@ record on its second run. Failures exit with distinct codes (missing model, weat
 unavailable, incomplete day) so an alert can say which stage broke without anyone
 opening a log.
 
+All of it in one scheduled run — ingest, retrain if due, forecast, verify:
+
+```powershell
+.\scripts\daily.ps1
+```
+
+Registered as a Windows scheduled task at 11:30: after the 11:00 forecast origin, an
+hour before the 12:30 deadline. The script exits 0 only if tomorrow's forecast was
+stored; ingestion failing on a platform outage is logged and does not end the run.
+Setup and the reasoning behind the task settings are in [`scripts/README.md`](scripts/README.md).
+
+Refresh the model on a cycle — and refuse to promote a worse one:
+
+```bash
+uv run python -m powerforecast.jobs.retrain
+```
+
+Retraining is load-bearing rather than housekeeping: the bias correction switches
+itself off past 35 days of model age, so a 21-day cycle keeps it on with two weeks of
+slack. The job fits a candidate to everything before a 60-day holdout, scores it against
+the incumbent on hours neither was trained on, and **refuses to promote a clear
+regression** — a retrain has been measured at 67% worse than its predecessor, and the
+store promotes whatever was saved last. It also refuses when the panel has not advanced,
+because a model that learned nothing new would still reset its own age and switch the
+correction back on under false pretences. See
+[ADR 0011](docs/decisions/0011-scheduled-retraining.md).
+
 Then check the forecasts against what happened:
 
 ```bash
@@ -509,7 +536,7 @@ src/powerforecast/
 ├── evaluation/     # metrics, rolling-origin backtesting, comparison
 ├── forecasts/      # producing one delivery day, and where produced forecasts live
 ├── serving/        # the HTTP forecast service
-├── jobs/           # the unattended daily run
+├── jobs/           # the unattended daily run and the scheduled retrain
 ├── monitoring/     # verification against outcomes, and drift
 └── analysis/       # figures and the experiment runner
 ```
