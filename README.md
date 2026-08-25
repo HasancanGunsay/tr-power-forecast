@@ -12,12 +12,11 @@
 > **34% on MAE** and **36% on RMSE** — and still wins by 31% and 34% against that
 > forecast with its systematic bias already corrected, which is the harder comparison.
 >
-> **That is a backtest claim; the deployed model carries no bias correction.** The
-> winning variant's correction is estimated over the whole evaluation period, so it is a
-> competitor rather than a component — and a rolling, deployable version was built,
-> measured, and **rejected**: it makes things worse. Walked forward honestly the served
-> model still beats the plan by **19.8%**. See
-> [Running unattended, and checking afterwards](#running-unattended-and-checking-afterwards).
+> **The winning row's correction sees the whole evaluation period**, so it is a
+> competitor rather than a component. A version estimated only from the past reaches
+> **833** against its **831** — but only under two conditions that took three failed
+> attempts to find, and which are now enforced in code rather than written down. See
+> [ADR 0010](docs/decisions/0010-bias-correction-and-retraining.md).
 
 ![Learned models against the published plan](reports/figures/model_comparison.png)
 
@@ -40,9 +39,18 @@ every model refitted from scratch each fold, every forecast scored on the same h
 | Seasonal naive, 168h | 2,077 | 3,340 | 5.5% | −53 |
 | Seasonal naive, 48h | 3,142 | 4,409 | 8.1% | −11 |
 
-The row marked *deployed* is the one the service actually serves: no bias correction,
-because a deployable version of that correction was built and measured and made things
-worse ([ADR 0009](docs/decisions/0009-no-monotonic-trend-feature.md)).
+The row marked *deployed* is what the service serves. It now carries a **rolling bias
+correction estimated only from the past**, which on backtest predictions takes MAE from
+890 to **833** — about 95% of the way to the oracle row at the top, which is only
+reachable with hindsight.
+
+That correction took three failed attempts to find, and the reason is worth more than
+the number: it depends on two parameters that had both been set wrongly at once — a
+28-day window (the curve is flat only past 45) applied to a model that was never
+retrained (a stale model's bias drifts, and correcting it makes things *worse* by 2.6%).
+The freshness condition is enforced in code rather than documented, and the applied
+offset is stored next to each forecast so it stays auditable. See
+[ADR 0010](docs/decisions/0010-bias-correction-and-retraining.md).
 
 ### The comparison is against the corrected plan, not the raw one
 
@@ -426,8 +434,9 @@ Two things make this more than a scoreboard, both recorded in
 ### What the out-of-sample check actually says
 
 A model fitted to 2026-01-31 and walked forward over every delivery day to 3 August —
-4,439 hours nobody chose, with no refit. **The served model beats the published plan by
-19.8%**, and every bias correction tried on top of it makes things worse:
+4,439 hours nobody chose, **with no refit at any point**. That last part turns out to be
+the whole story. On this stale-model window the served model beats the published plan by
+19.8%, and every bias correction tried on top of it makes things worse:
 
 | forecast | MAE | RMSE |
 |---|---|---|
@@ -438,17 +447,26 @@ A model fitted to 2026-01-31 and walked forward over every delivery day to 3 Aug
 | + constant offset, mean | 946.7 | 1,254.9 |
 | published plan | 1,140.5 | 1,530.8 |
 
-A rolling, leak-free bias correction was built and tested precisely because the
-backtest's best variant uses one. It is not deployed, and the reason is measurable
-rather than arguable: over 181 delivery days the correlation between the offset it
-proposes and the day's realised median error is **−0.024**, and it pushes the forecast
-the *wrong way* on **43%** of days. There is no signal there to use.
+That table reads as a verdict on bias correction and is not one. It is a verdict on
+**correcting a model nobody retrains** — and it took two more measurements to see the
+difference:
 
-It had looked worth +0.7% until a monotonic trend feature was removed from the design
-matrix — that feature was creating the persistent level error the correction had been
-repairing. Both halves of that story are in
-[ADR 0009](docs/decisions/0009-no-monotonic-trend-feature.md); it is also what took the
-backtest headline from 914 to 831.
+| | raw | 28-day correction | 119-day correction |
+|---|---|---|---|
+| refit monthly *(backtest)* | 889.8 | 854.2 (−4.0%) | **833.3 (−6.3%)** |
+| trained once, never refreshed *(above)* | 912.8 | 936.6 (**+2.6%**) | 916.4 (+0.4%) |
+
+Two parameters had to be right at once: a window past the 45-day knee of the curve, and
+a model young enough that the bias it learned still describes the present. The stale
+model's bias **drifts as it ages**, so a trailing estimate always describes an error that
+has already moved.
+
+The correction is now applied, with `should_correct` refusing it past 35 days of model
+age — the retraining schedule and the bias correction are one decision, so the coupling
+is a function rather than a comment.
+[ADR 0010](docs/decisions/0010-bias-correction-and-retraining.md) has the full sweep, and
+records that the deployed number is an expectation from backtest predictions rather than
+something the running system has yet demonstrated.
 
 **Correction to an earlier claim.** A first check on a single 30-day window in July put
 the deployed model *behind* the plan and was reported that way. It does not survive the

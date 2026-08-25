@@ -26,23 +26,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pandas as pd
 
 from powerforecast.features.availability import LOCAL_TZ, forecast_origins
 from powerforecast.features.build import build_design_matrix
-from powerforecast.models.persistence import SavedModel
-
-# The columns every produced forecast carries, in order. The store, the service
-# and the monitoring layer all agree on this tuple; changing it is a schema
-# change and has to be made here.
-FORECAST_COLUMNS = (
-    "forecast_mwh",
-    "model_name",
-    "model_version",
-    "forecast_origin",
-    "generated_at",
-)
+from powerforecast.forecasts.bias import BiasOffsets, estimate_offsets, should_correct
+from powerforecast.forecasts.store import FORECAST_COLUMNS, latest_run, read_forecasts
+from powerforecast.models.persistence import ModelCard, SavedModel
 
 
 class IncompleteForecastError(RuntimeError):
@@ -101,6 +93,8 @@ class DayForecast:
     model_version: str
     generated_at: datetime
     values: pd.Series
+    bias_offset: pd.Series
+    bias_reason: str = ""
 
     def to_frame(self) -> pd.DataFrame:
         """The canonical record layout, ready for the store.
@@ -115,6 +109,7 @@ class DayForecast:
         frame = pd.DataFrame(
             {
                 "forecast_mwh": self.values.astype("float64"),
+                "bias_offset_mwh": self.bias_offset.astype("float64"),
                 "model_name": self.model_name,
                 "model_version": self.model_version,
                 "forecast_origin": self.forecast_origin,
@@ -132,6 +127,8 @@ def forecast_day(
     delivery_date: date,
     *,
     generated_at: datetime | None = None,
+    correct_bias: bool = True,
+    forecasts_root: Path | None = None,
 ) -> DayForecast:
     """Predict every hour of one delivery day, or refuse.
 
@@ -141,6 +138,10 @@ def forecast_day(
         panel: Observed history. Extended internally to cover the delivery day.
         delivery_date: Local calendar date to forecast.
         generated_at: Injectable clock, so a test does not depend on when it runs.
+        correct_bias: Apply the rolling bias correction. On by default; it is
+            worth 6.3% of MAE when the model is being retrained, and the guard
+            inside `delivery_offsets` refuses it when the model is stale.
+        forecasts_root: Where past forecasts live, for the error history.
 
     Raises:
         IncompleteForecastError: if any hour of the day lacks a complete feature
@@ -169,14 +170,67 @@ def forecast_day(
             data_available_until=observed.max() if len(observed) else None,
         )
 
+    origin = pd.Timestamp(forecast_origins(hours).iloc[0])
+    raw = model.predict(day.loc[complete])
+
+    offsets, reason = (
+        delivery_offsets(card, panel, origin, root=forecasts_root)
+        if correct_bias
+        else (BiasOffsets(method="none", reason="correction disabled by the caller"), "disabled")
+    )
+    applied = offsets.offsets_for(pd.DatetimeIndex(complete))
+
     return DayForecast(
         delivery_date=delivery_date,
-        forecast_origin=pd.Timestamp(forecast_origins(hours).iloc[0]),
+        forecast_origin=origin,
         model_name=card.name,
         model_version=card.version,
         generated_at=generated_at or datetime.now(UTC),
-        values=model.predict(day.loc[complete]),
+        values=raw + applied,
+        bias_offset=applied,
+        bias_reason=f"{offsets.method}: {reason}" if reason else offsets.reason,
     )
+
+
+def delivery_offsets(
+    card: ModelCard,
+    panel: pd.DataFrame,
+    origin: pd.Timestamp,
+    *,
+    root: Path | None = None,
+    target: str = "consumption_mwh",
+) -> tuple[BiasOffsets, str]:
+    """Estimate the correction for one delivery day from forecasts already stored.
+
+    Lives here rather than in the job because the service produces forecasts too,
+    and a correction applied on one path and not the other would make the two
+    disagree — which is the divergence this whole module exists to prevent.
+
+    The error history is **what the system actually forecast**, read back from the
+    store and joined to what happened. It cannot be recomputed: a forecast
+    recalculated today from today's data is a different, much better forecast.
+
+    Refuses on a stale model. That is not a detail — the same correction is worth
+    −6.3% of MAE under regular retraining and **+2.6%** on a model trained once
+    and never refreshed. See `forecasts.bias`.
+    """
+    fresh, why = should_correct(card.train_end, origin)
+    if not fresh:
+        return BiasOffsets(method="none", reason=why), why
+
+    stored = read_forecasts(end=origin, model_name=card.name, root=root)
+    if stored.empty:
+        return BiasOffsets(method="none", reason="no stored forecasts yet"), why
+
+    stored = latest_run(stored)
+    actual = panel[target].reindex(stored.index)
+    # `residual = actual - forecast`, the convention `estimate_offsets` expects.
+    # Note it uses the *uncorrected* forecast: correcting from already-corrected
+    # errors would estimate the residual of the correction, not of the model.
+    raw = stored["forecast_mwh"] - stored["bias_offset_mwh"]
+    errors = (actual - raw).dropna()
+
+    return estimate_offsets(errors, origin=origin), why
 
 
 def delivery_hours(delivery_date: date, *, tz: str = LOCAL_TZ) -> pd.DatetimeIndex:

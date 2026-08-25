@@ -34,9 +34,21 @@ from pathlib import Path
 import pandas as pd
 
 from powerforecast.config import PATHS
-from powerforecast.forecasts.day import FORECAST_COLUMNS
 
 FORECAST_DIR = "forecasts"
+
+# The columns every produced forecast carries, in order. This is the contract
+# between the job that writes forecasts and the monitoring layer that reads them,
+# so it lives with the storage rather than with the model code — and changing it
+# is a schema change, made here.
+FORECAST_COLUMNS = (
+    "forecast_mwh",
+    "bias_offset_mwh",
+    "model_name",
+    "model_version",
+    "forecast_origin",
+    "generated_at",
+)
 
 # What makes two rows the same row. Not just the timestamp: one hour may legally
 # hold several forecasts, one per model version.
@@ -95,6 +107,7 @@ def read_forecasts(
     *,
     start: pd.Timestamp | str | None = None,
     end: pd.Timestamp | str | None = None,
+    model_name: str | None = None,
     model_version: str | None = None,
     root: Path | None = None,
 ) -> pd.DataFrame:
@@ -114,10 +127,19 @@ def read_forecasts(
 
     frame = pd.concat([pd.read_parquet(path) for path in files]).sort_index()
 
+    # Files written before the correction existed have no offset column. Filling
+    # it with zero is exactly right: those forecasts were uncorrected, and a
+    # missing column would otherwise force every reader to handle two shapes.
+    if "bias_offset_mwh" not in frame.columns:
+        frame["bias_offset_mwh"] = 0.0
+    frame = frame[list(FORECAST_COLUMNS)]
+
     if start is not None:
         frame = frame[frame.index >= pd.Timestamp(start)]
     if end is not None:
         frame = frame[frame.index <= pd.Timestamp(end)]
+    if model_name is not None:
+        frame = frame[frame["model_name"] == model_name]
     if model_version is not None:
         frame = frame[frame["model_version"] == model_version]
 

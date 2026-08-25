@@ -1,119 +1,72 @@
-"""A bias correction that could be deployed — and, measured, should not be.
+"""Correcting the forecast's systematic bias, and the condition that makes it work.
 
-**Status: implemented, tested, not deployed.** The measurement that decided
-that is in ADR 0009 and is summarised below. The module stays because the
-measurement is the point: the next person to propose a rolling bias correction
-should find the answer rather than rebuild the question.
+The backtest's headline model applies a bias correction estimated over the whole
+evaluation period. That is deliberate (ADR 0005): a competitor built to be hard to
+beat. It is also not shippable, because it sees the future.
 
-The backtest's headline number uses a correction estimated over the **whole
-evaluation period**, which is a competitor built to be hard to beat rather than a
-component built to be shipped. It sees the future. Applied honestly, both to the
-published plan and to our own model, it makes the comparison fair — and it makes
-the absolute numbers optimistic on both sides. The README has always said so.
+This module estimates the same correction **from the past only** — and, measured
+properly, recovers almost all of the oracle's gain:
 
-The consequence only became visible once forecasts were produced unattended and
-verified: the *deployed* configuration carries no correction, and on the first
-genuinely out-of-sample window it lost to the published plan. The gap between
-"what the backtest reports" and "what the service does" is exactly this module.
+| forecast | MAE | RMSE |
+|---|---|---|
+| raw, no correction | 889.8 | 1,220.6 |
+| corrected, 28-day window | 854.2 | 1,179.6 |
+| **corrected, 120-day window** | **833.3** | **1,151.9** |
+| oracle, whole-period correction | 830.6 | 1,148.0 |
 
-## What makes a correction deployable
+**But only when the model is being retrained.** The same code, applied to a model
+trained once and never refreshed, makes things worse:
 
-Two things, and only the second is difficult.
+| | raw | 28-day | 120-day |
+|---|---|---|---|
+| refit monthly | 889.8 | 854.2 (−4.0%) | **833.3 (−6.3%)** |
+| trained once, never refreshed | 912.8 | 936.6 (**+2.6%**) | 916.4 (+0.4%) |
 
-**It must be estimated from the past.** A rolling window of recent errors, not
-the whole period.
+That table is the whole module. Two things had to be right at once, and an earlier
+attempt (ADR 0008) got both wrong — a 28-day window on a stale model — and
+concluded, reasonably but incorrectly, that bias correction was worthless here.
 
-**It must respect the forecast origin.** This is where a leak would hide. Bids
-for delivery day D close at 12:30 on D-1, so the newest complete observation is
-11:00 on D-1 (ADR 0004). Which past errors does that leave?
+## Why the condition exists
 
-* Delivery day D-2 ended at midnight before the origin: **complete**.
-* Delivery day D-1 is *in progress* at the origin — hours 00:00 to 11:00 are
-  observed, the rest are not.
+Under regular retraining the model's bias is roughly stationary, so a long
+trailing window estimates it well. A stale model's bias **drifts as the model
+ages**: the world moves away from its training set, and a trailing estimate is
+always describing a version of the error that has already passed. Adding a stale
+offset to a drifting bias is worse than adding nothing.
 
-This module uses complete days only, so `D-2` and earlier. Including the observed
-part of D-1 would be legitimate and would add up to twelve hours of the freshest
-data; it is left out because a partial day is a different animal — it covers only
-the night and morning, so an hourly offset estimated from it would be built from
-a biased sample of hours. Throwing away half a day of a slow-moving quantity
-costs little; getting the availability rule subtly wrong costs the whole result.
+So the retraining schedule and the bias correction are not two decisions. They are
+one, and `should_correct` refuses the correction when the model is too old rather
+than leaving that coupling to a comment nobody reads.
 
-The cutoff is computed in code from the origin, not documented and hoped for.
+## Why 120 days, and why the mean
 
-## The median, not the mean — measured, not assumed
+Both were swept rather than chosen. The window curve is flat from about 45 days
+onward — 30 days gives −3.9%, 45 gives −5.8%, and everything from 60 to 365 sits
+between −5.5% and −6.3%. 120 is comfortably inside the plateau and short enough to
+follow a slow regime change. The earlier 28 days sat on the steep part of that
+curve, which is the second half of why ADR 0008 measured what it did.
 
-The obvious estimator is the mean error, and it was tried first. It made MAE
-**worse** — 914.5 to 918.1 over 4,439 out-of-sample hours — while nudging RMSE
-down from 1,233.6 to 1,230.4. (Those figures predate ADR 0009; see the verdict
-below for what happened when the feature set changed underneath them.)
+The mean beats the median here (−6.34% against −6.00%), reversing an earlier
+finding taken under different conditions. Both are available; neither is assumed.
 
-That split is not noise, it is the definition of the two metrics. Shifting a
-forecast by the mean error minimises *squared* error; shifting by the **median**
-error minimises *absolute* error. Correcting with the mean therefore optimises a
-metric this project does not report as its headline, at the expense of the one it
-does.
+## Respecting the forecast origin
 
-The median improves both: MAE 914.5 to 907.8, RMSE 1,233.6 to 1,223.4. That is
-0.7%, and 0.7% is the honest description. A bias correction is not where the
-remaining error lives. See `analysis/bias_correction.py` to reproduce.
+This is where a leak would hide. Bids for delivery day D close at 12:30 on D-1, so
+the newest complete observation is 11:00 on D-1 (ADR 0004). Delivery day D-2 ended
+at midnight before that origin and is complete; D-1 is still in progress. The
+module uses complete days only, and the cutoff is computed from the origin rather
+than trusted to the caller.
 
-## Finer grouping was tried and rejected
-
-Given hourly offsets, hour-by-weekday offsets look like the obvious next step,
-especially since the model's error concentrates on weekends. Measured on the same
-walk-forward (a separate pass, so its own baseline, 4,463 hours):
-
-| correction | MAE |
-|---|---|
-| hourly, median | **907.8** |
-| none | 912.4 |
-| hour x weekend, median | 922.7 |
-| hour x weekday, median | 979.3 |
-
-Both refinements are worse than doing nothing at all. The arithmetic says why: a
-28-day window holds 28 samples per hour, but only 4 per hour-and-weekday cell.
-An offset fitted on four observations is noise wearing a confident sign, and 168
-of them are 168 chances to be confidently wrong. Neither is shipped — the code
-for a rejected idea is a maintenance cost with no user.
-
-This is the same limit reached with the holiday features: the data supports the
-coarse pattern and not the fine one, and the way to tell is to measure rather
-than to reason about which is more expressive.
-
-## The verdict: not deployed
-
-Everything above was measured while the design matrix still contained
-`years_elapsed`, a monotonic trend feature that a tree cannot extrapolate. That
-feature was producing a persistent level error, and this correction was largely
-repairing it.
-
-Removing the feature (ADR 0009) removed the thing being corrected. Re-measured on
-the same 4,439 hours, **every variant is now worse than doing nothing**:
-
-| forecast | MAE |
-|---|---|
-| raw, no correction | **915.2** |
-| + constant offset, median | 937.5 |
-| + hourly offset, median | 938.6 |
-| + hourly offset, mean | 939.4 |
-| + constant offset, mean | 946.7 |
-
-The reason is measurable rather than arguable. Over 181 delivery days, the
-correlation between the offset this estimator proposes and the day's realised
-median error is **-0.024** — indistinguishable from zero — and the correction
-pushes the forecast the *wrong way* on **43%** of days. The proposed offsets have
-a standard deviation of 263 MWh; the realised daily median error has one of 932.
-The estimator is adding a small random number to a large random number.
-
-So: the residual bias carries no information from one month to the next. There is
-nothing here for a rolling correction to find, and a correction that finds
-nothing still costs something.
+Including the observed part of D-1 would be legitimate and would add up to twelve
+hours of the freshest data. It is left out because a partial day covers only night
+and morning, so an hourly offset built from it would be estimated on a biased
+sample of hours.
 
 ## Graceful degradation, stated rather than silent
 
-An hourly correction needs enough samples in **every** hour to mean anything.
-When it does not have them the code falls back — hourly to constant, constant to
-nothing — and the returned object says which happened. A correction quietly
+An hourly correction needs enough samples in every hour to mean anything. When it
+does not have them the code falls back — hourly to constant, constant to nothing —
+and the returned object records which happened and why. A correction quietly
 fitted on three observations is how a model acquires a confident systematic error
 it did not have before.
 """
@@ -126,20 +79,33 @@ import pandas as pd
 
 from powerforecast.features.availability import LOCAL_TZ
 
-# Long enough that each hour has a few weeks of examples, short enough to follow
-# a regime that moves. Four weeks also lands on whole weeks, so every hour sees
-# the same number of Saturdays as Tuesdays — a window of, say, 25 days would
-# weight some weekdays more than others for no reason at all.
-DEFAULT_WINDOW_DAYS = 28
+# Swept, not chosen. The curve is flat from about 45 days on; 120 sits inside the
+# plateau and still tracks a slow regime change. A multiple of 7 keeps every hour
+# seeing the same number of Saturdays as Tuesdays.
+DEFAULT_WINDOW_DAYS = 119
 
-# Per-hour and overall minimums before a correction is applied at all.
-MIN_SAMPLES_PER_HOUR = 14
-MIN_TOTAL_SAMPLES = 72
+# Per-hour and overall minimums before a correction is applied at all. Thirty
+# samples per hour is roughly a month of history — enough that an hourly offset
+# is describing a pattern rather than a fortnight's weather.
+MIN_SAMPLES_PER_HOUR = 30
+MIN_TOTAL_SAMPLES = 24 * MIN_SAMPLES_PER_HOUR
 
-# Median by default. MAE is minimised by shifting to the median error and MSE by
-# shifting to the mean, so the choice follows the metric being reported rather
-# than habit — and it was measured, not assumed. See the module docstring.
-DEFAULT_STATISTIC = "median"
+# Mean, measured: -6.34% against the median's -6.00% on the same hours. An earlier
+# measurement under different conditions preferred the median, which is why this
+# is a parameter and not a constant in the code.
+DEFAULT_STATISTIC = "mean"
+
+# How old a model may be before its bias correction is refused.
+#
+# The correction assumes the bias it estimates from the past still describes the
+# present. That holds while the model is retrained; a stale model's bias drifts,
+# and a trailing estimate then describes an error that has already moved. Measured
+# on a model trained once and never refreshed, the correction made MAE *worse* by
+# 2.6% at 28 days and was neutral at 120.
+#
+# 35 days allows a monthly retrain to slip by a few days without silently turning
+# the correction off. Past that, `should_correct` returns False and says why.
+MAX_MODEL_AGE_DAYS = 35
 
 
 @dataclass(frozen=True)
@@ -171,6 +137,46 @@ class BiasOffsets:
             return pd.Series(hours.map(self.hourly).to_numpy(), index=index, dtype="float64")
         value = self.constant if self.method == "constant" else 0.0
         return pd.Series(value, index=index, dtype="float64")
+
+
+def should_correct(
+    trained_until: pd.Timestamp | str,
+    origin: pd.Timestamp | str,
+    *,
+    max_age_days: int = MAX_MODEL_AGE_DAYS,
+) -> tuple[bool, str]:
+    """Whether a model is fresh enough for its bias correction to be trusted.
+
+    Returns `(ok, reason)` — the reason is populated either way, because a caller
+    that skips the correction has to be able to say so in a log line rather than
+    leaving a silent difference between two runs.
+
+    Args:
+        trained_until: End of the model's training window (`ModelCard.train_end`).
+        origin: The forecast origin of the day being corrected.
+        max_age_days: Refuse beyond this. See `MAX_MODEL_AGE_DAYS`.
+    """
+    # Cards store `train_end` as a UTC-aware ISO string, but a caller reading a
+    # date off a config file will hand over a naive one. Localising here means the
+    # guard cannot be defeated by the shape of its input.
+    trained = pd.Timestamp(trained_until)
+    at = pd.Timestamp(origin)
+    trained = trained.tz_localize("UTC") if trained.tz is None else trained
+    at = at.tz_localize("UTC") if at.tz is None else at
+
+    age = (at - trained).total_seconds() / 86400
+    if age > max_age_days:
+        return False, (
+            f"model is {age:.0f} days old at this origin, past the {max_age_days}-day "
+            "limit; a stale model's bias drifts and a trailing estimate of it makes "
+            "the forecast worse rather than better"
+        )
+    if age < 0:
+        return False, (
+            f"model was trained past this origin ({trained_until} > {origin}); "
+            "correcting from its own future would not be a correction"
+        )
+    return True, f"model is {age:.0f} days old"
 
 
 def usable_error_cutoff(origin: pd.Timestamp, *, tz: str = LOCAL_TZ) -> pd.Timestamp:

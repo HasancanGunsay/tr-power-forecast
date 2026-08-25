@@ -114,6 +114,13 @@ series with two regimes inside every window. Not shipped.
   The plan and naive baselines are unchanged to the decimal, which is what
   confirms the comparison is like for like.
 
+* **Corrected by [ADR 0010](0010-bias-correction-and-retraining.md).** The
+  conclusion below — that bias correction is worthless here — was drawn from a
+  28-day window applied to a stale model. With a 119-day window on a regularly
+  retrained model the same code is worth **−6.3% of MAE**. The measurement
+  below stands for the configuration it was taken in; the generalisation does
+  not.
+
 * **[ADR 0008](0008-deployable-bias-correction.md) is reversed by this.** The
   deployable rolling bias correction was measured as worth +0.7% MAE *with* the
   trend feature. Re-measured without it, every variant is now **worse than no

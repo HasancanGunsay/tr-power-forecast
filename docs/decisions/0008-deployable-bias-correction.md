@@ -1,6 +1,6 @@
 # 0008 — A bias correction that can be deployed, and what it is worth
 
-**Status:** Superseded by [0009](0009-no-monotonic-trend-feature.md)
+**Status:** Superseded by [0010](0010-bias-correction-and-retraining.md)
 **Date:** 2026-08-20
 
 > **Superseded the same day.** Every measurement here was taken while the design

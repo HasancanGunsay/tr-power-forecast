@@ -28,6 +28,7 @@ def make_day(
     *,
     version: str = "20260807T070528Z",
     base: float = 40_000.0,
+    offset: float = 0.0,
     generated_at: datetime | None = None,
 ) -> pd.DataFrame:
     """One delivery day in the canonical layout."""
@@ -35,7 +36,10 @@ def make_day(
     hours = pd.DatetimeIndex(
         pd.date_range(start, start + pd.DateOffset(days=1), freq="h", inclusive="left")
     ).tz_convert("UTC")
-    values = pd.Series(base + pd.Series(range(len(hours)), index=hours) * 10.0, index=hours)
+    # `values` is the *corrected* forecast, which is what gets stored; the offset
+    # is carried alongside so the raw number stays recoverable.
+    raw = base + pd.Series(range(len(hours)), index=hours) * 10.0
+    values = pd.Series(raw + offset, index=hours)
 
     return DayForecast(
         delivery_date=date.fromisoformat(delivery_date),
@@ -44,7 +48,25 @@ def make_day(
         model_version=version,
         generated_at=generated_at or datetime(2026, 8, 7, 9, 0, tzinfo=UTC),
         values=values,
+        bias_offset=pd.Series(offset, index=hours, dtype="float64"),
     ).to_frame()
+
+
+def test_the_applied_offset_travels_with_the_forecast(tmp_path):
+    """A correction that cannot be audited later is a correction nobody trusts.
+
+    Storing the offset next to the value means "was this number corrected, and by
+    how much?" is answerable from the row — rather than by rerunning an estimator
+    against a history that has since changed underneath it.
+    """
+    write_forecasts(make_day("2026-08-01", offset=250.0), root=tmp_path)
+
+    stored = read_forecasts(root=tmp_path)
+
+    assert (stored["bias_offset_mwh"] == 250.0).all()
+    # The stored value is the corrected one; the raw forecast is recoverable.
+    raw = stored["forecast_mwh"] - stored["bias_offset_mwh"]
+    assert raw.iloc[0] == 40_000.0
 
 
 def test_a_written_day_reads_back_whole(tmp_path):
