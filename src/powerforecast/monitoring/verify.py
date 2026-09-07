@@ -77,10 +77,14 @@ from powerforecast.data.panel import load_panel
 from powerforecast.evaluation.metrics import ErrorSummary, bias, summarize
 from powerforecast.features.availability import LOCAL_TZ
 from powerforecast.forecasts.store import latest_run, read_forecasts
+from powerforecast.models.baselines import seasonal_naive
 from powerforecast.models.persistence import ModelStoreError, read_card
+from powerforecast.targets import TARGETS, Target, resolve
 
 logger = logging.getLogger("verify")
 
+# Kept for callers that still name them, but the target registry is the source
+# of truth now — see `powerforecast.targets`.
 TARGET_COLUMN = "consumption_mwh"
 PLAN_COLUMN = "load_plan_mwh"
 
@@ -129,8 +133,7 @@ def verify(
     forecasts: pd.DataFrame,
     panel: pd.DataFrame,
     *,
-    target: str = TARGET_COLUMN,
-    plan: str = PLAN_COLUMN,
+    target: Target | str | None = None,
     model_directory: Path | None = None,
 ) -> pd.DataFrame:
     """Join stored forecasts to what actually happened.
@@ -152,8 +155,19 @@ def verify(
     under the heading `bias` — produced two confidently wrong sentences before
     anyone noticed, which is the whole argument for naming things apart.
 
-    The plan columns are what make drift detection possible; `in_sample` is what
-    stops a fitted hour being counted as a forecast. See the module docstring.
+    **The control columns are what make drift detection possible**, and which
+    control is used depends on the target. Load has a published operator plan,
+    so the control is a professional forecast of the same quantity. Price has
+    none — the platform publishes no price forecast (ADR 0012) — so the control
+    falls back to a seasonal naive at the target's own lag.
+
+    The naive is a weaker competitor and any statement about price drift has to
+    say so. But it has the property that matters: it gets harder exactly when
+    the market does, so error rising in both means the period was hard rather
+    than the model worse. Without *some* control the detector collapses to
+    "error went up", which is the failure ADR 0007 was built to avoid.
+
+    `in_sample` is what stops a fitted hour being counted as a forecast.
     """
     if forecasts.empty:
         return _empty_verification()
@@ -164,19 +178,23 @@ def verify(
     # that has nothing to do with performance.
     forecasts = latest_run(forecasts)
 
-    actual = panel[target].reindex(forecasts.index)
+    resolved = resolve(target)
+
+    actual = panel[resolved.column].reindex(forecasts.index)
     verified = forecasts.loc[actual.notna()].copy()
     if verified.empty:
         return _empty_verification()
 
-    verified["actual_mwh"] = actual.loc[verified.index]
-    verified["residual"] = verified["actual_mwh"] - verified["forecast_mwh"]
+    verified["actual"] = actual.loc[verified.index]
+    verified["residual"] = verified["actual"] - verified["forecast_value"]
     verified["abs_error"] = verified["residual"].abs()
 
-    if plan in panel.columns:
-        verified["plan_mwh"] = panel[plan].reindex(verified.index)
-        verified["plan_residual"] = verified["actual_mwh"] - verified["plan_mwh"]
-        verified["plan_abs_error"] = verified["plan_residual"].abs()
+    control, control_name = _control(panel, resolved, pd.DatetimeIndex(verified.index))
+    if control is not None:
+        verified["control_value"] = control
+        verified["control_name"] = control_name
+        verified["control_residual"] = verified["actual"] - verified["control_value"]
+        verified["control_abs_error"] = verified["control_residual"].abs()
 
     verified["delivery_date"] = pd.DatetimeIndex(verified.index).tz_convert(LOCAL_TZ).date
     verified["in_sample"] = _in_sample_flags(verified, directory=model_directory)
@@ -191,7 +209,12 @@ def out_of_sample(verified: pd.DataFrame) -> pd.DataFrame:
 
 
 def daily_summary(verified: pd.DataFrame) -> pd.DataFrame:
-    """One row per delivery day: how the day went, ours and the plan's.
+    """One row per delivery day: how the day went, ours and the control's.
+
+    The `control` column names what the comparison was against, because
+    "skill 0.35" means something different against an operator forecast than
+    against a seasonal naive and a table that does not say which is a table
+    that will be misread.
 
     Per-day rather than per-hour because a delivery day is the unit that was
     actually bid. A bad afternoon inside an otherwise fine day is a modelling
@@ -210,12 +233,13 @@ def daily_summary(verified: pd.DataFrame) -> pd.DataFrame:
             # Same convention as `evaluation.metrics.bias`: positive means the
             # forecast runs high. Computed through that function rather than
             # negated by hand, so the two can never drift apart.
-            "bias": bias(group["actual_mwh"], group["forecast_mwh"]),
+            "bias": bias(group["actual"], group["forecast_value"]),
         }
-        if "plan_abs_error" in group and group["plan_abs_error"].notna().any():
-            plan_mae = float(group["plan_abs_error"].mean())
-            row["plan_MAE"] = plan_mae
-            row["skill_vs_plan"] = _skill(row["MAE"], plan_mae)  # type: ignore[arg-type]
+        if "control_abs_error" in group and group["control_abs_error"].notna().any():
+            control_mae = float(group["control_abs_error"].mean())
+            row["control"] = str(group["control_name"].iloc[0])
+            row["control_MAE"] = control_mae
+            row["skill_vs_control"] = _skill(row["MAE"], control_mae)  # type: ignore[arg-type]
         rows.append(row)
 
     return pd.DataFrame(rows).set_index("delivery_date").sort_index()
@@ -232,7 +256,7 @@ def overall(verified: pd.DataFrame, *, include_in_sample: bool = False) -> Error
     scored = verified if include_in_sample else out_of_sample(verified)
     if scored.empty:
         return None
-    return summarize(scored["actual_mwh"], scored["forecast_mwh"], mape_floor=MAPE_FLOOR)
+    return summarize(scored["actual"], scored["forecast_value"], mape_floor=MAPE_FLOOR)
 
 
 def detect_drift(
@@ -250,8 +274,8 @@ def detect_drift(
     Four outcomes:
 
     * ``INSUFFICIENT`` — not enough verified hours on one side. No verdict.
-    * ``DEGRADED`` — error rose **and** skill against the plan fell. This is the
-      one worth acting on: we lost ground the plan did not.
+    * ``DEGRADED`` — error rose **and** skill against the control fell. This is
+      the one worth acting on: we lost ground the control did not.
     * ``HARDER_PERIOD`` — error rose but skill held. The period was harder for
       everyone; a retrain would be chasing weather.
     * ``OK`` — nothing to report.
@@ -302,8 +326,8 @@ def detect_drift(
     if worse and skill_fell:
         status = "DEGRADED"
         detail = (
-            f"MAE {baseline_mae:,.0f} -> {recent_mae:,.0f} and skill against the plan "
-            f"{baseline_skill:.3f} -> {recent_skill:.3f}. The plan did not lose the same "
+            f"MAE {baseline_mae:,.0f} -> {recent_mae:,.0f} and skill against the control "
+            f"{baseline_skill:.3f} -> {recent_skill:.3f}. The control did not lose the same "
             "ground, so this is the model rather than the weather. Consider a retrain."
         )
     elif worse:
@@ -371,21 +395,51 @@ def _in_sample_flags(frame: pd.DataFrame, *, directory: Path | None) -> pd.Serie
     return flags
 
 
-def _skill(our_mae: float, plan_mae: float) -> float:
-    """Fraction of the plan's error we remove. 0 means level, 1 means perfect.
+def _control(
+    panel: pd.DataFrame,
+    target: Target,
+    index: pd.DatetimeIndex,
+) -> tuple[pd.Series | None, str]:
+    """The competing forecast to judge skill against, and its name.
+
+    Prefers the published plan where the market publishes one. Falls back to a
+    seasonal naive, which is always constructible from the panel — so a target
+    without a plan still gets a control rather than losing drift detection.
+
+    The naive is built through `models.baselines.seasonal_naive`, not by
+    shifting the series here, so it obeys the same availability rule as every
+    other use of it. A control that quietly used unobservable data would make
+    our skill look worse than it is and send a healthy model for retraining.
+    """
+    if target.plan_column is not None and target.plan_column in panel.columns:
+        plan = panel[target.plan_column].reindex(index)
+        if plan.notna().any():
+            return plan, target.plan_column
+
+    naive = seasonal_naive(panel[target.column], season_hours=target.naive_season_hours).reindex(
+        index
+    )
+    if naive.notna().any():
+        return naive, f"seasonal_naive_{target.naive_season_hours}h"
+
+    return None, ""
+
+
+def _skill(our_mae: float, control_mae: float) -> float:
+    """Fraction of the control's error we remove. 0 means level, 1 means perfect.
 
     Negative when we are worse, which is the right behaviour: a metric that
     floors at zero would hide exactly the situation the monitor exists to catch.
     """
-    if plan_mae <= 0:
+    if control_mae <= 0:
         return float("nan")
-    return (plan_mae - our_mae) / plan_mae
+    return (control_mae - our_mae) / control_mae
 
 
 def _window_skill(window: pd.DataFrame) -> float:
-    if "plan_abs_error" not in window or window["plan_abs_error"].isna().all():
+    if "control_abs_error" not in window or window["control_abs_error"].isna().all():
         return float("nan")
-    return _skill(float(window["abs_error"].mean()), float(window["plan_abs_error"].mean()))
+    return _skill(float(window["abs_error"].mean()), float(window["control_abs_error"].mean()))
 
 
 def _insufficient(detail: str, *, recent_hours: int = 0, baseline_hours: int = 0) -> DriftVerdict:
@@ -403,7 +457,7 @@ def _insufficient(detail: str, *, recent_hours: int = 0, baseline_hours: int = 0
 
 def _empty_verification() -> pd.DataFrame:
     return pd.DataFrame(
-        columns=["forecast_mwh", "actual_mwh", "residual", "abs_error", "delivery_date"],
+        columns=["forecast_value", "actual", "residual", "abs_error", "delivery_date"],
         index=pd.DatetimeIndex([], tz="UTC", name="timestamp"),
     )
 
@@ -421,11 +475,13 @@ def run(
     recent_days: int = 14,
     processed_root: Path | None = None,
     model_directory: Path | None = None,
+    target: Target | str | None = None,
 ) -> tuple[pd.DataFrame, DriftVerdict]:
+    resolved = resolve(target)
     forecasts = read_forecasts(
-        start=start, end=end, model_version=model_version, root=processed_root
+        start=start, end=end, model_version=model_version, root=processed_root, target=resolved
     )
-    verified = verify(forecasts, load_panel(), model_directory=model_directory)
+    verified = verify(forecasts, load_panel(), target=resolved, model_directory=model_directory)
     return verified, detect_drift(verified, recent_days=recent_days)
 
 
@@ -435,6 +491,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", default=None, help="last delivery hour, ISO")
     parser.add_argument("--model-version", default=None)
     parser.add_argument("--recent-days", type=int, default=14)
+    parser.add_argument(
+        "--target",
+        choices=sorted(TARGETS),
+        default="load",
+        help="which store to verify; also selects the control skill is measured against",
+    )
     parser.add_argument("--csv", type=Path, default=None, help="write the daily table here")
     args = parser.parse_args(argv)
 
@@ -445,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
         end=args.end,
         model_version=args.model_version,
         recent_days=args.recent_days,
+        target=args.target,
     )
 
     if verified.empty:

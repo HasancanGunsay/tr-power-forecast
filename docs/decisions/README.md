@@ -28,6 +28,9 @@ history of a mistake is part of what makes the log useful.
 | [0009](0009-no-monotonic-trend-feature.md) | Removing the linear trend, and what it had been hiding | Accepted |
 | [0010](0010-bias-correction-and-retraining.md) | The bias correction works, and what it depends on | Accepted |
 | [0011](0011-scheduled-retraining.md) | Scheduled retraining, with a gate | Accepted |
+| [0012](0012-price-baseline-and-rejected-features.md) | Price modelling: the baseline, the window, and two rejected features | Accepted |
+| [0013](0013-supply-side-weather.md) | Supply-side weather, and the generation schedule that could not be used | Accepted |
+| [0014](0014-serving-two-targets.md) | Serving two targets without forking the pipeline | Accepted |
 
 ## Template
 

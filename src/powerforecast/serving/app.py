@@ -35,7 +35,7 @@ consequences run through everything below.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -50,11 +50,11 @@ from powerforecast.data.panel import load_panel
 from powerforecast.features.availability import LOCAL_TZ
 from powerforecast.forecasts.day import IncompleteForecastError, forecast_day
 from powerforecast.models.persistence import (
-    DEFAULT_MODEL_NAME,
     ModelStoreError,
     SavedModel,
     load_model,
 )
+from powerforecast.targets import TARGETS, Target, resolve
 
 # How long a loaded panel may be reused before it is read from disk again.
 #
@@ -136,8 +136,29 @@ class ServiceState:
     anything.
     """
 
-    model: SavedModel
+    models: dict[str, SavedModel]
+    """One loaded model per target it can answer for, keyed by target name."""
+
     panel: PanelCache
+
+    def model_for(self, target: Target) -> SavedModel:
+        """The model answering for a target, or a 404 naming what is served.
+
+        A 404 rather than a 422: the caller asked for a resource this deployment
+        does not have. Listing what it does have turns a dead end into a usable
+        error, which matters more here than usual because which targets a
+        deployment serves is a deployment choice, not a property of the API.
+        """
+        try:
+            return self.models[target.name]
+        except KeyError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "message": f"this deployment does not serve {target.name!r}",
+                    "served": sorted(self.models),
+                },
+            ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +174,15 @@ class ServiceState:
 # 2. The response is validated on the way out. A handler that returns a string
 #    where a float belongs fails here, in this process, rather than in whatever
 #    consumes the JSON.
-# 3. They name the contract. `forecast_mwh` says both what the number is and
-#    what unit it is in — and a unit that lives only in someone's head is the
-#    kind of thing that eventually gets multiplied by a thousand.
+# 3. They name the contract, and the unit is part of that contract — a unit
+#    living only in someone's head is the kind of thing that eventually gets
+#    multiplied by a thousand.
+#
+#    This field was once called `forecast_mwh`, which put the unit in the key.
+#    That was the right call while load was the only target and became wrong the
+#    moment a price could be returned, because the key would have been a lie in
+#    half the responses. The unit did not leave the payload — it moved from the
+#    key to a value, where it can differ between responses and still be read.
 
 
 class HourlyForecast(BaseModel):
@@ -163,13 +190,15 @@ class HourlyForecast(BaseModel):
 
     timestamp: datetime = Field(description="Start of the delivery hour, UTC.")
     local_hour: int = Field(ge=0, le=23, description="Hour of the day in Europe/Istanbul.")
-    forecast_mwh: float = Field(description="Forecast consumption for that hour, in MWh.")
+    forecast_value: float = Field(description="Forecast for that hour, in the response's `unit`.")
 
 
 class ForecastResponse(BaseModel):
     """A full delivery day, and the provenance of the numbers in it."""
 
     delivery_date: date
+    target: str = Field(description="What was forecast: 'load' or 'price'.")
+    unit: str = Field(description="Unit of every `forecast_value` below, e.g. 'MWh'.")
     forecast_origin: datetime = Field(
         description=(
             "The newest observation the forecast is allowed to use: 11:00 local on the "
@@ -183,14 +212,29 @@ class ForecastResponse(BaseModel):
     hours: list[HourlyForecast]
 
 
-class HealthResponse(BaseModel):
-    """Liveness, and — more usefully — identity."""
+class ModelStatus(BaseModel):
+    """Which model is answering for one target."""
 
-    status: str
+    target: str
+    unit: str
     model_name: str
     model_version: str
     model_trained_rows: int
     model_trained_until: datetime
+
+
+class HealthResponse(BaseModel):
+    """Liveness, and — more usefully — identity.
+
+    `models` is a list rather than a single block because a deployment can serve
+    more than one target, and "which model is answering?" has to be answerable
+    per target. Flattening it would make the common post-deploy check — did the
+    version I just shipped actually land? — ambiguous exactly when two models
+    are in play.
+    """
+
+    status: str
+    models: list[ModelStatus]
     panel_end: datetime = Field(description="Last hour present in the cached panel, UTC.")
     panel_age_seconds: float
 
@@ -202,7 +246,7 @@ class HealthResponse(BaseModel):
 
 def create_app(
     *,
-    model_name: str = DEFAULT_MODEL_NAME,
+    models: Mapping[str, str] | None = None,
     model_version: str = "latest",
     model_directory: Path | None = None,
     panel_loader: Callable[[], pd.DataFrame] | None = None,
@@ -217,6 +261,10 @@ def create_app(
     than a patched one.
 
     Args:
+        models: Target name -> model name in the store. Defaults to every known
+            target under its conventional name. A deployment that should serve
+            only one target passes only that one, and a target absent here is
+            absent from the API rather than answered by the wrong model.
         require_environment: Refuse to start when the model was fitted under
             different library versions. **On by default here**, unlike in
             `load_model`, and the asymmetry is deliberate. Opening an old model
@@ -225,6 +273,10 @@ def create_app(
             of whoever is deploying it — rather than at three in the morning,
             subtly, in the numbers.
     """
+
+    requested = (
+        dict(models) if models is not None else {name: f"{name}-lightgbm" for name in TARGETS}
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -241,23 +293,27 @@ def create_app(
         under other libraries, the process refuses to come up. A service that
         starts and then returns errors looks healthy to everything watching it.
         """
-        try:
-            model = load_model(
-                model_name,
-                model_version,
-                directory=model_directory,
-                require_environment=require_environment,
-            )
-        except ModelStoreError as error:
-            # Re-raised with the fix in the message. A stack trace tells the
-            # reader what broke; this tells them what to do about it.
-            raise RuntimeError(
-                f"the service cannot start without a model: {error}\n"
-                "Train one with: uv run python -m powerforecast.models.train"
-            ) from error
+        loaded: dict[str, SavedModel] = {}
+        for target_name, name in requested.items():
+            try:
+                loaded[target_name] = load_model(
+                    name,
+                    model_version,
+                    directory=model_directory,
+                    require_environment=require_environment,
+                )
+            except ModelStoreError as error:
+                # Re-raised with the fix in the message, naming the target. A
+                # stack trace tells the reader what broke; this tells them what
+                # to do about it, and which of several models is the problem.
+                raise RuntimeError(
+                    f"the service cannot start without a {target_name!r} model: {error}\n"
+                    f"Train one with: uv run python -m powerforecast.models.train "
+                    f"--target {target_name}"
+                ) from error
 
         app.state.service = ServiceState(
-            model=model,
+            models=loaded,
             panel=PanelCache(loader=panel_loader or load_panel, ttl_seconds=panel_ttl_seconds),
         )
         yield
@@ -285,14 +341,20 @@ def create_app(
         nothing proves only that the process exists. This one proves the data
         can be read, and publishes how stale it is.
         """
-        card = state.model.card
         panel = state.panel.get()
         return HealthResponse(
             status="ok",
-            model_name=card.name,
-            model_version=card.version,
-            model_trained_rows=card.n_train_rows,
-            model_trained_until=datetime.fromisoformat(card.train_end),
+            models=[
+                ModelStatus(
+                    target=target_name,
+                    unit=resolve(target_name).unit,
+                    model_name=model.card.name,
+                    model_version=model.card.version,
+                    model_trained_rows=model.card.n_train_rows,
+                    model_trained_until=datetime.fromisoformat(model.card.train_end),
+                )
+                for target_name, model in sorted(state.models.items())
+            ],
             panel_end=pd.DatetimeIndex(panel.index).max().to_pydatetime(),
             panel_age_seconds=round(state.panel.age_seconds(), 1),
         )
@@ -308,6 +370,10 @@ def create_app(
                 examples=["2026-08-01"],
             ),
         ],
+        target: Annotated[
+            str,
+            Query(description="What to forecast.", examples=["load", "price"]),
+        ] = "load",
     ) -> ForecastResponse:
         """Forecast every hour of one delivery day.
 
@@ -318,7 +384,18 @@ def create_app(
         string and parsing it by hand would mean writing that error message
         badly, once per endpoint.
         """
-        return _forecast_day(state, delivery_date)
+        try:
+            resolved = resolve(target)
+        except KeyError as error:
+            # 422 here, unlike the 404 for a target that exists but is not
+            # deployed. The distinction is worth keeping: one is a typo, the
+            # other is a deployment fact.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"message": str(error), "known": sorted(TARGETS)},
+            ) from error
+
+        return _forecast_day(state, delivery_date, resolved)
 
     return app
 
@@ -354,10 +431,10 @@ def get_state(request: Request) -> ServiceState:
 # result into a response body, and a domain refusal into a status code.
 
 
-def _forecast_day(state: ServiceState, delivery_date: date) -> ForecastResponse:
+def _forecast_day(state: ServiceState, delivery_date: date, target: Target) -> ForecastResponse:
     """Adapt `forecasts.day.forecast_day` to an HTTP response."""
     try:
-        produced = forecast_day(state.model, state.panel.get(), delivery_date)
+        produced = forecast_day(state.model_for(target), state.panel.get(), delivery_date)
     except IncompleteForecastError as error:
         raise HTTPException(
             # 422, the same code FastAPI returns for a malformed parameter. The
@@ -374,6 +451,8 @@ def _forecast_day(state: ServiceState, delivery_date: date) -> ForecastResponse:
 
     return ForecastResponse(
         delivery_date=produced.delivery_date,
+        target=produced.target.name,
+        unit=produced.target.unit,
         forecast_origin=produced.forecast_origin.to_pydatetime(),
         model_name=produced.model_name,
         model_version=produced.model_version,
@@ -382,7 +461,7 @@ def _forecast_day(state: ServiceState, delivery_date: date) -> ForecastResponse:
             HourlyForecast(
                 timestamp=timestamp.to_pydatetime(),
                 local_hour=int(local_hour),
-                forecast_mwh=float(value),
+                forecast_value=float(value),
             )
             for timestamp, local_hour, value in zip(
                 stamps, local_hours, produced.values, strict=True

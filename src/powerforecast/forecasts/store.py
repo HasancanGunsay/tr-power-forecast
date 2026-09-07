@@ -5,9 +5,17 @@ monitoring layer is to ask, days later, "what did we say would happen, and what
 happened?" — and that question is unanswerable unless the answer was recorded at
 the moment it was still a prediction. Recording it afterwards is not recording it.
 
-Layout mirrors `data/raw`: one parquet file per month, UTC-partitioned.
+Layout mirrors `data/raw`: one directory per target, one parquet file per
+month inside it, UTC-partitioned.
 
-    data/processed/forecasts/YYYY-MM.parquet
+    data/processed/forecasts/<target>/YYYY-MM.parquet
+
+**The target is a directory, not a column.** Load is measured in MWh and price
+in TRY/MWh, and a reader that spans both and forgets to filter would average
+the two into a number that means nothing and raises nothing. Separate
+directories make that impossible rather than merely detectable — the same
+reason `data/raw` partitions by series. Every row still carries its `unit`, so
+a frame that has been read out of its directory can still say what it is.
 
 **The merge-on-write rule is not optional here.** Writing a month file by
 replacing it is correct only when the write covers the whole month, and this job
@@ -34,6 +42,7 @@ from pathlib import Path
 import pandas as pd
 
 from powerforecast.config import PATHS
+from powerforecast.targets import Target, resolve
 
 FORECAST_DIR = "forecasts"
 
@@ -41,30 +50,45 @@ FORECAST_DIR = "forecasts"
 # between the job that writes forecasts and the monitoring layer that reads them,
 # so it lives with the storage rather than with the model code — and changing it
 # is a schema change, made here.
+# Unit-neutral names. `forecast_mwh` was honest while load was the only target
+# and becomes a lie the moment a price lands in it, so the unit moved out of the
+# column name and into a column of its own where it can be read.
 FORECAST_COLUMNS = (
-    "forecast_mwh",
-    "bias_offset_mwh",
+    "forecast_value",
+    "bias_offset",
+    "unit",
     "model_name",
     "model_version",
     "forecast_origin",
     "generated_at",
 )
 
+# What the columns were called when load was the only target. Read support is
+# kept so the 24 rows written before this change stay readable; nothing writes
+# these names any more.
+LEGACY_COLUMNS = {"forecast_mwh": "forecast_value", "bias_offset_mwh": "bias_offset"}
+
 # What makes two rows the same row. Not just the timestamp: one hour may legally
 # hold several forecasts, one per model version.
 KEY_COLUMNS = ("timestamp", "model_version")
 
 
-def forecasts_root(root: Path | None = None) -> Path:
-    return (root or PATHS.processed) / FORECAST_DIR
+def forecasts_root(root: Path | None = None, *, target: Target | str | None = None) -> Path:
+    """Directory holding one target's forecasts."""
+    return (root or PATHS.processed) / FORECAST_DIR / resolve(target).name
 
 
-def month_path(month: str, *, root: Path | None = None) -> Path:
+def month_path(month: str, *, root: Path | None = None, target: Target | str | None = None) -> Path:
     """Path of the file holding one UTC month, e.g. ``"2026-08"``."""
-    return forecasts_root(root) / f"{month}.parquet"
+    return forecasts_root(root, target=target) / f"{month}.parquet"
 
 
-def write_forecasts(frame: pd.DataFrame, *, root: Path | None = None) -> int:
+def write_forecasts(
+    frame: pd.DataFrame,
+    *,
+    root: Path | None = None,
+    target: Target | str | None = None,
+) -> int:
     """Merge `frame` into the store and return the number of rows now on disk.
 
     The return value is read back **from disk**, not counted in memory. That
@@ -91,7 +115,7 @@ def write_forecasts(frame: pd.DataFrame, *, root: Path | None = None) -> int:
     # 24 rows may legitimately land in two files. Grouping rather than assuming
     # one file per call is what makes that a non-event.
     for month, group in frame.groupby(index.strftime("%Y-%m")):
-        path = month_path(str(month), root=root)
+        path = month_path(str(month), root=root, target=target)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if path.exists():
@@ -110,6 +134,7 @@ def read_forecasts(
     model_name: str | None = None,
     model_version: str | None = None,
     root: Path | None = None,
+    target: Target | str | None = None,
 ) -> pd.DataFrame:
     """Read stored forecasts, optionally narrowed by time or model version.
 
@@ -117,7 +142,7 @@ def read_forecasts(
     than raising. A monitoring run over a period with no forecasts is a real
     situation with a real answer — "nothing was forecast" — not an error.
     """
-    directory = forecasts_root(root)
+    directory = forecasts_root(root, target=target)
     if not directory.is_dir():
         return _empty()
 
@@ -127,11 +152,21 @@ def read_forecasts(
 
     frame = pd.concat([pd.read_parquet(path) for path in files]).sort_index()
 
-    # Files written before the correction existed have no offset column. Filling
-    # it with zero is exactly right: those forecasts were uncorrected, and a
-    # missing column would otherwise force every reader to handle two shapes.
-    if "bias_offset_mwh" not in frame.columns:
-        frame["bias_offset_mwh"] = 0.0
+    # Two generations of older files are tolerated on read, both by filling in
+    # what they could not have carried. A reader that had to handle three shapes
+    # would grow the same three branches in every caller.
+    frame = frame.rename(columns=LEGACY_COLUMNS)
+
+    # Files written before the correction existed have no offset column. Zero is
+    # exactly right: those forecasts were uncorrected.
+    if "bias_offset" not in frame.columns:
+        frame["bias_offset"] = 0.0
+
+    # Files written before the store was partitioned by target are load, because
+    # load was the only target that existed when they were written.
+    if "unit" not in frame.columns:
+        frame["unit"] = resolve(target).unit
+
     frame = frame[list(FORECAST_COLUMNS)]
 
     if start is not None:

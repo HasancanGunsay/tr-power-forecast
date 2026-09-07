@@ -60,7 +60,7 @@ def scenario(
     )
     forecasts = pd.DataFrame(
         {
-            "forecast_mwh": actual - sign * ours,
+            "forecast_value": actual - sign * ours,
             "model_name": "load-lightgbm",
             "model_version": "v1",
             "forecast_origin": index[0],
@@ -79,7 +79,7 @@ def test_only_hours_with_an_actual_are_verified():
     verified = verify(forecasts, panel)
 
     assert len(verified) == 72
-    assert verified["actual_mwh"].notna().all()
+    assert verified["actual"].notna().all()
 
 
 def test_bias_has_one_sign_convention_across_the_repository():
@@ -91,23 +91,23 @@ def test_bias_has_one_sign_convention_across_the_repository():
     """
     # Forecast deliberately below actual: residual positive, bias negative.
     forecasts, panel = scenario(days=4)
-    forecasts["forecast_mwh"] = panel["consumption_mwh"] - 500.0
+    forecasts["forecast_value"] = panel["consumption_mwh"] - 500.0
 
     verified = verify(forecasts, panel)
     daily = daily_summary(verified)
 
     assert (verified["residual"] == 500.0).all()
     assert (daily["bias"] == -500.0).all()
-    assert daily["bias"].iloc[0] == metrics_bias(verified["actual_mwh"], verified["forecast_mwh"])
+    assert daily["bias"].iloc[0] == metrics_bias(verified["actual"], verified["forecast_value"])
 
 
 def test_verification_carries_the_plan_as_a_control():
     forecasts, panel = scenario(days=4)
     verified = verify(forecasts, panel)
 
-    assert {"plan_mwh", "plan_abs_error"} <= set(verified.columns)
+    assert {"control_value", "control_abs_error"} <= set(verified.columns)
     assert verified["abs_error"].mean() == 500.0
-    assert verified["plan_abs_error"].mean() == 1_000.0
+    assert verified["control_abs_error"].mean() == 1_000.0
 
 
 def test_daily_summary_reports_skill_against_the_plan():
@@ -117,7 +117,7 @@ def test_daily_summary_reports_skill_against_the_plan():
     assert len(daily) == 4
     assert (daily["hours"] == 24).all()
     # We halve the plan's error, so skill is 0.5.
-    assert daily["skill_vs_plan"].round(3).eq(0.5).all()
+    assert daily["skill_vs_control"].round(3).eq(0.5).all()
 
 
 def test_a_stable_model_reports_ok():
@@ -178,7 +178,13 @@ def test_too_little_data_produces_no_verdict_at_all():
 
 def test_an_empty_store_is_handled_rather_than_crashed():
     empty = pd.DataFrame(
-        columns=["forecast_mwh", "model_name", "model_version", "forecast_origin", "generated_at"],
+        columns=[
+            "forecast_value",
+            "model_name",
+            "model_version",
+            "forecast_origin",
+            "generated_at",
+        ],
         index=pd.DatetimeIndex([], tz="UTC"),
     )
     _, panel = scenario(days=2)
@@ -195,7 +201,7 @@ def test_only_the_newest_version_is_scored_for_an_hour():
     forecasts, panel = scenario(days=4)
     older = forecasts.copy()
     older["model_version"] = "v0"
-    older["forecast_mwh"] = older["forecast_mwh"] - 5_000.0
+    older["forecast_value"] = older["forecast_value"] - 5_000.0
     older["generated_at"] = pd.Timestamp("2025-12-01", tz="UTC")
 
     verified = verify(pd.concat([older, forecasts]).sort_index(), panel)

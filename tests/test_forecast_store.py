@@ -21,6 +21,7 @@ from powerforecast.forecasts.store import (
     read_forecasts,
     write_forecasts,
 )
+from powerforecast.targets import LOAD
 
 
 def make_day(
@@ -49,6 +50,7 @@ def make_day(
         generated_at=generated_at or datetime(2026, 8, 7, 9, 0, tzinfo=UTC),
         values=values,
         bias_offset=pd.Series(offset, index=hours, dtype="float64"),
+        target=LOAD,
     ).to_frame()
 
 
@@ -63,9 +65,9 @@ def test_the_applied_offset_travels_with_the_forecast(tmp_path):
 
     stored = read_forecasts(root=tmp_path)
 
-    assert (stored["bias_offset_mwh"] == 250.0).all()
+    assert (stored["bias_offset"] == 250.0).all()
     # The stored value is the corrected one; the raw forecast is recoverable.
-    raw = stored["forecast_mwh"] - stored["bias_offset_mwh"]
+    raw = stored["forecast_value"] - stored["bias_offset"]
     assert raw.iloc[0] == 40_000.0
 
 
@@ -101,7 +103,7 @@ def test_rerunning_the_same_day_updates_rather_than_duplicates(tmp_path):
 
     stored = read_forecasts(root=tmp_path)
     assert len(stored) == 24
-    assert stored["forecast_mwh"].iloc[0] == 41_000.0  # the newer write won
+    assert stored["forecast_value"].iloc[0] == 41_000.0  # the newer write won
 
 
 def test_a_different_model_version_is_kept_alongside(tmp_path):

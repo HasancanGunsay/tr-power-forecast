@@ -55,7 +55,7 @@ def forecasts_for(
     sign = pd.Series(np.where(np.arange(len(index)) % 2 == 0, 1.0, -1.0), index=index)
     return pd.DataFrame(
         {
-            "forecast_mwh": 40_000.0 - sign * error,
+            "forecast_value": 40_000.0 - sign * error,
             "model_name": name,
             "model_version": version,
             "forecast_origin": index[0],

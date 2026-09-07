@@ -79,7 +79,7 @@ def client(tmp_path) -> TestClient:
     )
 
     app = create_app(
-        model_name="test-model",
+        models={"load": "test-model"},
         model_directory=tmp_path,
         panel_loader=synthetic_panel,
         # The model was fitted seconds ago by this very process, so the versions
@@ -100,9 +100,9 @@ def test_health_reports_which_model_is_serving(client):
     body = client.get("/health").json()
 
     assert body["status"] == "ok"
-    assert body["model_name"] == "test-model"
-    assert body["model_version"]
-    assert body["model_trained_rows"] > 0
+    assert body["models"][0]["model_name"] == "test-model"
+    assert body["models"][0]["model_version"]
+    assert body["models"][0]["model_trained_rows"] > 0
     assert body["panel_end"].startswith("2025-04-30")
 
 
@@ -113,7 +113,7 @@ def test_forecast_returns_every_hour_of_the_delivery_day(client):
 
     assert len(body["hours"]) == 24
     assert [h["local_hour"] for h in body["hours"]] == list(range(24))
-    assert all(h["forecast_mwh"] > 0 for h in body["hours"])
+    assert all(h["forecast_value"] > 0 for h in body["hours"])
 
 
 def test_forecast_carries_its_own_provenance(client):
@@ -121,7 +121,9 @@ def test_forecast_carries_its_own_provenance(client):
     body = client.get("/forecast", params={"date": SERVED_DAY}).json()
 
     assert body["model_name"] == "test-model"
-    assert body["model_version"] == client.get("/health").json()["model_version"]
+    assert body["target"] == "load"
+    assert body["unit"] == "MWh"
+    assert body["model_version"] == client.get("/health").json()["models"][0]["model_version"]
     # Origin is 11:00 local on the previous day — bids close at 12:30 and the
     # value stamped 12:00 is still accumulating.
     assert body["forecast_origin"].startswith("2025-04-19T11:00:00")
@@ -157,9 +159,9 @@ def test_a_malformed_date_is_rejected_by_the_framework(client):
 
 def test_the_service_refuses_to_start_without_a_model(tmp_path):
     """Failing at startup beats starting and then erroring on every request."""
-    app = create_app(model_name="no-such-model", model_directory=tmp_path)
+    app = create_app(models={"load": "no-such-model"}, model_directory=tmp_path)
 
-    with pytest.raises(RuntimeError, match="cannot start without a model"), TestClient(app):
+    with pytest.raises(RuntimeError, match=r"cannot start without a 'load' model"), TestClient(app):
         pass  # pragma: no cover — the context manager raises on entry
 
 
@@ -187,7 +189,7 @@ def test_the_panel_is_cached_and_then_refreshed(tmp_path):
         return panel
 
     app = create_app(
-        model_name="test-model",
+        models={"load": "test-model"},
         model_directory=tmp_path,
         panel_loader=counting_loader,
         panel_ttl_seconds=1_000,

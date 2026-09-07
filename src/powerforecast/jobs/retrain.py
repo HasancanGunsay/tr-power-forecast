@@ -74,7 +74,8 @@ from powerforecast.models.persistence import (
     SavedModel,
     load_model,
 )
-from powerforecast.models.train import train
+from powerforecast.models.train import spec_for, train
+from powerforecast.targets import TARGETS, resolve
 
 logger = logging.getLogger("retrain")
 
@@ -257,6 +258,7 @@ def run(
     force: bool = False,
     now: pd.Timestamp | None = None,
     panel: pd.DataFrame | None = None,
+    target: str | None = None,
 ) -> int:
     """Retrain if due and if the candidate does not regress. Returns the exit code."""
     try:
@@ -274,6 +276,15 @@ def run(
             # Nothing to do is a success. Exiting non-zero here would make a
             # scheduler treat an up-to-date model as a failure every day.
             return EXIT_OK
+
+    # The candidate must be fitted on the *incumbent's* feature set, read off its
+    # card. Falling back to `FeatureSpec()` here would have been silent and
+    # expensive: a scheduled retrain of the price model would have trained a
+    # **load** model, saved it under the price name, and compared it against the
+    # price incumbent on a holdout — three wrong things, none of which raises.
+    # The store resolves `latest` by timestamp, so saving is promoting.
+    spec = incumbent.card.spec() if incumbent is not None else spec_for(resolve(target))
+    logger.info("training on the %s target", spec.target)
 
     panel = load_panel() if panel is None else panel
     panel_end = pd.DatetimeIndex(panel.index).max()
@@ -293,7 +304,7 @@ def run(
 
     try:
         comparison = compare_on_holdout(
-            panel, incumbent, holdout_days=holdout_days, tolerance=tolerance
+            panel, incumbent, holdout_days=holdout_days, tolerance=tolerance, spec=spec
         )
     except ValueError as error:
         logger.error("cannot evaluate a candidate: %s", error)
@@ -313,6 +324,7 @@ def run(
     saved = train(
         model="lightgbm",
         panel=panel,
+        spec=spec,
         name=model_name,
         directory=model_directory,
         notes=f"scheduled retrain; holdout {comparison.verdict}: {comparison.detail}",
@@ -329,7 +341,16 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
+    parser.add_argument(
+        "--target",
+        choices=sorted(TARGETS),
+        default=None,
+        help=(
+            "convenience for --model. Only consulted when there is no incumbent; "
+            "otherwise the feature set comes from the incumbent's card."
+        ),
+    )
+    parser.add_argument("--model", default=None)
     parser.add_argument("--after-days", type=int, default=RETRAIN_AFTER_DAYS)
     parser.add_argument("--holdout-days", type=int, default=HOLDOUT_DAYS)
     parser.add_argument("--tolerance", type=float, default=REGRESSION_TOLERANCE)
@@ -344,7 +365,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return run(
-            model_name=args.model,
+            model_name=args.model
+            or (f"{args.target}-lightgbm" if args.target else DEFAULT_MODEL_NAME),
+            target=args.target,
             after_days=args.after_days,
             holdout_days=args.holdout_days,
             tolerance=args.tolerance,

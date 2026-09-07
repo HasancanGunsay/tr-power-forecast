@@ -46,10 +46,13 @@ from pathlib import Path
 import pandas as pd
 
 from powerforecast.data.panel import load_panel
+from powerforecast.data.supply_weather import fetch_live as fetch_live_supply
 from powerforecast.data.weather import WeatherError, fetch_live_all_cities, weather_features
+from powerforecast.features.build import FeatureSpec
 from powerforecast.forecasts.day import IncompleteForecastError, forecast_day
 from powerforecast.forecasts.store import write_forecasts
 from powerforecast.models.persistence import DEFAULT_MODEL_NAME, ModelStoreError, load_model
+from powerforecast.targets import TARGETS
 
 logger = logging.getLogger("daily_forecast")
 
@@ -103,7 +106,9 @@ def run(
 
     if fetch_weather:
         try:
-            panel = _with_tomorrow_weather(panel, delivery_date, today=today)
+            panel = _with_tomorrow_weather(
+                panel, delivery_date, today=today, spec=model.card.spec()
+            )
         except WeatherError as error:
             logger.error("weather for %s unavailable: %s", delivery_date, error)
             return EXIT_WEATHER
@@ -115,7 +120,9 @@ def run(
             logger.error("%s: %s", key, value)
         return EXIT_INCOMPLETE
 
-    rows = write_forecasts(produced.to_frame(), root=processed_root)
+    # Target comes from the forecast, which got it from the model card. Nothing
+    # in this job names a target, so nothing here can name the wrong one.
+    rows = write_forecasts(produced.to_frame(), root=processed_root, target=produced.target)
     logger.info(
         "stored %d hours for %s (origin %s); %d rows now in the affected months",
         len(produced.values),
@@ -127,9 +134,20 @@ def run(
 
 
 def _with_tomorrow_weather(
-    panel: pd.DataFrame, delivery_date: date, *, today: date
+    panel: pd.DataFrame, delivery_date: date, *, today: date, spec: FeatureSpec
 ) -> pd.DataFrame:
-    """Attach the delivery day's temperature to the panel, in memory only.
+    """Attach the delivery day's weather to the panel, in memory only.
+
+    **Which weather is decided by the model, not by this job.** The spec comes
+    off the card, so a model fitted on irradiance and wind gets them fetched and
+    one fitted without them does not pay for the requests.
+
+    That coupling was added after running this job for real. Every test passed
+    and the price model had been trained and saved, but the first live
+    invocation refused the day with `missing_features: ['solar_index',
+    'wind_index']` — the job only knew how to fetch temperature. Reading the
+    code did not show it; running it did, which is now the third time on this
+    project.
 
     Deliberately not written to `data/raw`. The stored weather series is the
     *archive* — what was being forecast for a past day, as recorded afterwards —
@@ -147,13 +165,25 @@ def _with_tomorrow_weather(
         inclusive="left",
     ).tz_convert("UTC")
 
-    raw = fetch_live_all_cities(delivery_date, today=today)
-    weather = weather_features(raw).reindex(hours)
+    frames = []
+    if spec.include_weather:
+        raw = fetch_live_all_cities(delivery_date, today=today)
+        frames.append(weather_features(raw).reindex(hours))
+
+    if spec.include_supply_weather:
+        supply = fetch_live_supply(delivery_date, today=today)
+        frames.append(supply[["solar_index", "wind_index"]].reindex(hours))
+
+    if not frames:
+        return panel
+
+    weather = pd.concat(frames, axis=1)
 
     if weather.isna().any().any():
         raise WeatherError(
             f"live weather for {delivery_date.isoformat()} is incomplete: "
-            f"{int(weather.isna().any(axis=1).sum())} of {len(hours)} hours missing"
+            f"{int(weather.isna().any(axis=1).sum())} of {len(hours)} hours missing "
+            f"across {list(weather.columns)}"
         )
 
     grid = pd.date_range(panel.index.min(), hours[-1], freq="h", tz="UTC")
@@ -175,7 +205,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="delivery day (default: tomorrow)",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
+    parser.add_argument(
+        "--target",
+        choices=sorted(TARGETS),
+        default=None,
+        help=(
+            "convenience for --model: picks the conventional model name for a "
+            "target. The store partition is never taken from here — it comes "
+            "from the model card, so this flag cannot misfile a forecast."
+        ),
+    )
+    parser.add_argument("--model", default=None)
     parser.add_argument("--model-version", default="latest")
     parser.add_argument(
         "--no-weather",
@@ -194,7 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run(
             args.date,
-            model_name=args.model,
+            model_name=args.model
+            or (f"{args.target}-lightgbm" if args.target else DEFAULT_MODEL_NAME),
             model_version=args.model_version,
             fetch_weather=not args.no_weather,
         )

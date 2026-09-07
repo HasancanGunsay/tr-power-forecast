@@ -28,6 +28,7 @@ from powerforecast.data.panel import load_panel
 from powerforecast.features.build import FeatureSpec, build_design_matrix, usable_rows
 from powerforecast.models.estimators import make_lightgbm, make_ridge
 from powerforecast.models.persistence import SavedModel, save_model
+from powerforecast.targets import TARGETS, Target, for_column, resolve
 
 FACTORIES: dict[str, Callable[[], Any]] = {"lightgbm": make_lightgbm, "ridge": make_ridge}
 
@@ -85,11 +86,29 @@ def train(
     estimator = FACTORIES[model]().fit(features, target)
     return save_model(
         estimator,
-        name=name or f"load-{model}",
+        # Derived from what the spec actually forecasts. Hardcoding "load" here
+        # would have silently filed a price model under the load name, and the
+        # store resolves `latest` by timestamp — so the next service restart
+        # would have served a price model to a caller asking for demand.
+        name=name or f"{for_column(spec.target).name}-{model}",
         features=features,
         spec=spec,
         directory=directory,
         notes=notes,
+    )
+
+
+def spec_for(target: Target, *, weather: bool = True) -> FeatureSpec:
+    """The feature set a deployed model for `target` should be fitted on.
+
+    Reads the preferences off the target rather than branching on its name, so
+    adding a third target is a row in `powerforecast.targets` and not an edit
+    here.
+    """
+    return FeatureSpec(
+        target=target.column,
+        include_weather=weather,
+        include_supply_weather=target.include_supply_weather,
     )
 
 
@@ -103,6 +122,12 @@ def main() -> None:
         default=None,
         help="last timestamp to train on, ISO; omit to use every usable row",
     )
+    parser.add_argument(
+        "--target",
+        choices=sorted(TARGETS),
+        default="load",
+        help="what to forecast; selects the target column and its feature preset",
+    )
     parser.add_argument("--no-weather", action="store_true")
     parser.add_argument("--out", type=Path, default=PATHS.models)
     args = parser.parse_args()
@@ -110,7 +135,7 @@ def main() -> None:
     saved = train(
         model=args.model,
         train_until=args.train_until,
-        spec=FeatureSpec(include_weather=not args.no_weather),
+        spec=spec_for(resolve(args.target), weather=not args.no_weather),
         name=args.name,
         directory=args.out,
         notes=args.notes,

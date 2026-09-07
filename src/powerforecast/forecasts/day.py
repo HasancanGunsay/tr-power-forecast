@@ -35,6 +35,7 @@ from powerforecast.features.build import build_design_matrix
 from powerforecast.forecasts.bias import BiasOffsets, estimate_offsets, should_correct
 from powerforecast.forecasts.store import FORECAST_COLUMNS, latest_run, read_forecasts
 from powerforecast.models.persistence import ModelCard, SavedModel
+from powerforecast.targets import Target, for_column, resolve
 
 
 class IncompleteForecastError(RuntimeError):
@@ -94,6 +95,7 @@ class DayForecast:
     generated_at: datetime
     values: pd.Series
     bias_offset: pd.Series
+    target: Target
     bias_reason: str = ""
 
     def to_frame(self) -> pd.DataFrame:
@@ -108,8 +110,12 @@ class DayForecast:
         """
         frame = pd.DataFrame(
             {
-                "forecast_mwh": self.values.astype("float64"),
-                "bias_offset_mwh": self.bias_offset.astype("float64"),
+                "forecast_value": self.values.astype("float64"),
+                "bias_offset": self.bias_offset.astype("float64"),
+                # Repeated down all 24 rows like the provenance columns, and for
+                # the same reason: a frame lifted out of its directory must still
+                # be able to say whether it holds MWh or lira.
+                "unit": self.target.unit,
                 "model_name": self.model_name,
                 "model_version": self.model_version,
                 "forecast_origin": self.forecast_origin,
@@ -148,6 +154,10 @@ def forecast_day(
             set. Never returns a partial day.
     """
     card = model.card
+    # Derived, never passed. The card records the spec, the spec names the target
+    # column, so the unit and the store partition follow from the model itself —
+    # a caller cannot put a price forecast in the load directory by mistake.
+    target = for_column(card.spec().target)
     hours = delivery_hours(delivery_date)
 
     full = extended_panel(panel, through=hours[-1])
@@ -174,7 +184,7 @@ def forecast_day(
     raw = model.predict(day.loc[complete])
 
     offsets, reason = (
-        delivery_offsets(card, panel, origin, root=forecasts_root)
+        delivery_offsets(card, panel, origin, root=forecasts_root, target=target)
         if correct_bias
         else (BiasOffsets(method="none", reason="correction disabled by the caller"), "disabled")
     )
@@ -188,6 +198,7 @@ def forecast_day(
         generated_at=generated_at or datetime.now(UTC),
         values=raw + applied,
         bias_offset=applied,
+        target=target,
         bias_reason=f"{offsets.method}: {reason}" if reason else offsets.reason,
     )
 
@@ -198,7 +209,7 @@ def delivery_offsets(
     origin: pd.Timestamp,
     *,
     root: Path | None = None,
-    target: str = "consumption_mwh",
+    target: Target | str | None = None,
 ) -> tuple[BiasOffsets, str]:
     """Estimate the correction for one delivery day from forecasts already stored.
 
@@ -218,16 +229,18 @@ def delivery_offsets(
     if not fresh:
         return BiasOffsets(method="none", reason=why), why
 
-    stored = read_forecasts(end=origin, model_name=card.name, root=root)
+    resolved = for_column(card.spec().target) if target is None else resolve(target)
+
+    stored = read_forecasts(end=origin, model_name=card.name, root=root, target=resolved)
     if stored.empty:
         return BiasOffsets(method="none", reason="no stored forecasts yet"), why
 
     stored = latest_run(stored)
-    actual = panel[target].reindex(stored.index)
+    actual = panel[resolved.column].reindex(stored.index)
     # `residual = actual - forecast`, the convention `estimate_offsets` expects.
     # Note it uses the *uncorrected* forecast: correcting from already-corrected
     # errors would estimate the residual of the correction, not of the model.
-    raw = stored["forecast_mwh"] - stored["bias_offset_mwh"]
+    raw = stored["forecast_value"] - stored["bias_offset"]
     errors = (actual - raw).dropna()
 
     return estimate_offsets(errors, origin=origin), why

@@ -86,6 +86,7 @@ Write-Log "=== scheduled run starting in $RepoRoot ==="
 #    exist, because a month written today is not finished (see data/backfill.py).
 $ingest = Invoke-Step -Name 'ingest: EPIAS' -Arguments @('-m', 'powerforecast.data.backfill')
 $weather = Invoke-Step -Name 'ingest: weather archive' -Arguments @('-m', 'powerforecast.data.backfill_weather')
+$supply = Invoke-Step -Name 'ingest: supply weather archive' -Arguments @('-m', 'powerforecast.data.backfill_supply_weather')
 
 if ($ingest -ne 0) {
     Write-Log "NOTE ingest failed ($ingest). Continuing: the panel may still reach far enough."
@@ -93,23 +94,52 @@ if ($ingest -ne 0) {
 if ($weather -ne 0) {
     Write-Log "NOTE weather archive failed ($weather). Tomorrow's temperature comes from the live run, not this."
 }
-
-# 2. Retrain if due. Exit 4 means the panel has not advanced, which is expected
-#    on a day the ingest found nothing new — not a failure of this run.
-$retrain = Invoke-Step -Name 'retrain (if due)' -Arguments @('-m', 'powerforecast.jobs.retrain')
-switch ($retrain) {
-    0 { }
-    4 { Write-Log 'NOTE retrain skipped: no new data since the model was trained.' }
-    2 { Write-Log 'WARN retrain refused to promote a candidate that regressed. The incumbent stays.' }
-    default { Write-Log "WARN retrain exited $retrain." }
+if ($supply -ne 0) {
+    Write-Log "NOTE supply weather archive failed ($supply). Tomorrow's irradiance and wind come from the live run, not this."
 }
 
-# 3. The thing that must happen.
-$forecast = Invoke-Step -Name "forecast tomorrow" -Arguments @('-m', 'powerforecast.jobs.daily_forecast')
+# Both targets get the same treatment. Kept as a list rather than two copied
+# blocks so that adding a third target is one string, and so a step added for
+# one target cannot be forgotten for the other.
+$targets = @('load', 'price')
+
+# 2. Retrain if due, per target. Exit 4 means the panel has not advanced, which
+#    is expected on a day the ingest found nothing new — not a failure.
+foreach ($target in $targets) {
+    $retrain = Invoke-Step -Name "retrain $target (if due)" -Arguments @('-m', 'powerforecast.jobs.retrain', '--target', $target)
+    switch ($retrain) {
+        0 { }
+        4 { Write-Log "NOTE retrain $target skipped: no new data since the model was trained." }
+        2 { Write-Log "WARN retrain $target refused to promote a candidate that regressed. The incumbent stays." }
+        default { Write-Log "WARN retrain $target exited $retrain." }
+    }
+}
+
+# 3. The thing that must happen — for every target.
+#
+#    The exit code stays narrow: zero only if *every* target's forecast reached
+#    the store. A day where price was bid and load was not is not a successful
+#    day, and collapsing that into "mostly worked" is how a missing forecast
+#    goes unnoticed. The first non-zero is what the script exits with, and the
+#    log names which target produced it.
+$forecast = 0
+foreach ($target in $targets) {
+    $code = Invoke-Step -Name "forecast tomorrow: $target" -Arguments @('-m', 'powerforecast.jobs.daily_forecast', '--target', $target)
+    if ($code -ne 0) {
+        Write-Log "WARN forecast for $target exited $code."
+        if ($forecast -eq 0) { $forecast = $code }
+    }
+}
 
 # 4. Verify what past forecasts turned out to be worth. Informational: a
 #    DEGRADED verdict is news, not a broken run, so it never decides the exit.
-$null = Invoke-Step -Name 'verify past forecasts' -Arguments @('-m', 'powerforecast.monitoring.verify')
+#
+#    Note what "skill" means differs by target — against the operator plan for
+#    load, against a seasonal naive for price, because no price plan is
+#    published (ADR 0012). The verdict names its control.
+foreach ($target in $targets) {
+    $null = Invoke-Step -Name "verify past forecasts: $target" -Arguments @('-m', 'powerforecast.monitoring.verify', '--target', $target)
+}
 
 Write-Log "=== finished; forecast step exited $forecast ==="
 exit $forecast
