@@ -228,3 +228,36 @@ def test_retrain_takes_its_feature_set_from_the_incumbent_card(tmp_path) -> None
     assert derived.target == "price_try_mwh", "a retrain would have switched target"
     assert derived.include_supply_weather is True, "and would have dropped the supply signal"
     assert save_model is not None  # keeps the import meaningful to a reader
+
+
+# --------------------------------------------------------------------------- #
+# Bias correction is measured per target, never inherited
+# --------------------------------------------------------------------------- #
+
+
+def test_bias_correction_is_on_for_load_and_off_for_price() -> None:
+    """Measured separately, and the answers disagree in direction.
+
+    On load the correction is worth -6.3% of MAE on a retrained model (ADR 0010).
+    On price the same machinery in the same configuration is +2.5% *worse*, and
+    the best variant is -0.4% — noise (ADR 0015). Price inherited load's setting
+    until it was measured, which is exactly the cost this test pins down.
+    """
+    assert LOAD.correct_bias is True
+    assert PRICE.correct_bias is False
+
+
+def test_a_target_without_correction_reports_why_rather_than_going_quiet() -> None:
+    """A forecast with no offset must say whether that was policy or a refusal.
+
+    'No correction applied' has three causes here — the target is configured
+    without one, the model is too stale, or there is no error history yet — and
+    a stored forecast that cannot distinguish them is unauditable later.
+    """
+    from powerforecast.forecasts.bias import BiasOffsets
+
+    offsets = BiasOffsets(
+        method="none", reason=f"no bias correction is configured for {PRICE.name}"
+    )
+
+    assert "price" in offsets.reason

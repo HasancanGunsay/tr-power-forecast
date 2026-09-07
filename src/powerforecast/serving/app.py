@@ -48,7 +48,12 @@ from pydantic import BaseModel, Field
 
 from powerforecast.data.panel import load_panel
 from powerforecast.features.availability import LOCAL_TZ
-from powerforecast.forecasts.day import IncompleteForecastError, forecast_day
+from powerforecast.forecasts.day import (
+    IncompleteForecastError,
+    delivery_hours,
+    forecast_day,
+)
+from powerforecast.forecasts.store import latest_run, read_forecasts
 from powerforecast.models.persistence import (
     ModelStoreError,
     SavedModel,
@@ -141,6 +146,10 @@ class ServiceState:
 
     panel: PanelCache
 
+    processed_root: Path | None = None
+    """Where the daily job writes its forecasts. Read when the panel cannot
+    answer a day — see `_stored_day`."""
+
     def model_for(self, target: Target) -> SavedModel:
         """The model answering for a target, or a 404 naming what is served.
 
@@ -198,6 +207,13 @@ class ForecastResponse(BaseModel):
 
     delivery_date: date
     target: str = Field(description="What was forecast: 'load' or 'price'.")
+    source: str = Field(
+        description=(
+            "'computed' when the service built the forecast from the panel just now, "
+            "'stored' when it returned what the scheduled job produced before the bid "
+            "deadline. For a future delivery day 'stored' is the authoritative one."
+        )
+    )
     unit: str = Field(description="Unit of every `forecast_value` below, e.g. 'MWh'.")
     forecast_origin: datetime = Field(
         description=(
@@ -251,6 +267,7 @@ def create_app(
     model_directory: Path | None = None,
     panel_loader: Callable[[], pd.DataFrame] | None = None,
     panel_ttl_seconds: float = PANEL_TTL_SECONDS,
+    processed_root: Path | None = None,
     require_environment: bool = True,
 ) -> FastAPI:
     """Build the application.
@@ -315,6 +332,7 @@ def create_app(
         app.state.service = ServiceState(
             models=loaded,
             panel=PanelCache(loader=panel_loader or load_panel, ttl_seconds=panel_ttl_seconds),
+            processed_root=processed_root,
         )
         yield
         # Nothing to tear down: no sockets, no pools, no threads. The block is
@@ -432,10 +450,47 @@ def get_state(request: Request) -> ServiceState:
 
 
 def _forecast_day(state: ServiceState, delivery_date: date, target: Target) -> ForecastResponse:
-    """Adapt `forecasts.day.forecast_day` to an HTTP response."""
+    """Adapt `forecasts.day.forecast_day` to an HTTP response, or serve a stored one.
+
+    ## Why there are two sources
+
+    The service reads the panel from disk, and the panel holds observed history.
+    Tomorrow's weather is not in it, so `forecast_day` correctly refuses the one
+    day anyone actually wants — which made the service unable to answer the
+    question the project exists to answer.
+
+    Fetching the live weather forecast inside the handler would close that, and
+    was rejected. It puts twelve outbound HTTP requests on the request path:
+    responses go from milliseconds to tens of seconds, the service stops
+    answering whenever the weather provider is down, and ten callers asking
+    about the same day pay for the same fetch ten times.
+
+    The scheduled job already fetches that weather once, before the bid
+    deadline, and writes the result to the forecast store. So the service reads
+    it back. That is faster, has no external dependency, and is **more
+    auditable than recomputing**: the number returned is the number that was
+    actually available when bids were submitted, not a fresh one computed from
+    data that arrived afterwards.
+
+    The response says which source it came from, because the two are not
+    interchangeable. A recomputed past day is a diagnostic; a stored future day
+    is the forecast of record.
+
+    If neither can answer, the refusal names both attempts rather than only the
+    first — otherwise the message sends the reader to fix the panel when the
+    real answer is that the daily job has not run.
+    """
     try:
         produced = forecast_day(state.model_for(target), state.panel.get(), delivery_date)
     except IncompleteForecastError as error:
+        stored = _stored_day(state, delivery_date, target)
+        if stored is not None:
+            return stored
+        detail = error.as_dict()
+        detail["stored_forecast"] = (
+            "none found for this delivery day either; the scheduled job may not "
+            "have run. See scripts/README.md."
+        )
         raise HTTPException(
             # 422, the same code FastAPI returns for a malformed parameter. The
             # request was well formed but cannot be acted on, which is exactly
@@ -443,7 +498,7 @@ def _forecast_day(state: ServiceState, delivery_date: date, target: Target) -> F
             # and 500 would suggest the service is broken. Neither is true here —
             # the data has not arrived yet.
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=error.as_dict(),
+            detail=detail,
         ) from error
 
     stamps = pd.DatetimeIndex(produced.values.index)
@@ -453,6 +508,7 @@ def _forecast_day(state: ServiceState, delivery_date: date, target: Target) -> F
         delivery_date=produced.delivery_date,
         target=produced.target.name,
         unit=produced.target.unit,
+        source="computed",
         forecast_origin=produced.forecast_origin.to_pydatetime(),
         model_name=produced.model_name,
         model_version=produced.model_version,
@@ -465,6 +521,51 @@ def _forecast_day(state: ServiceState, delivery_date: date, target: Target) -> F
             )
             for timestamp, local_hour, value in zip(
                 stamps, local_hours, produced.values, strict=True
+            )
+        ],
+    )
+
+
+def _stored_day(
+    state: ServiceState, delivery_date: date, target: Target
+) -> ForecastResponse | None:
+    """The delivery day as the scheduled job produced it, or `None`.
+
+    Returns a day only if it is **complete**. The same rule the computing path
+    follows: a day short one hour is a position nobody bid, and answering with
+    23 hours would be worse than refusing, because the caller has no way to see
+    that an hour is missing from a list.
+    """
+    hours = delivery_hours(delivery_date)
+
+    stored = read_forecasts(start=hours[0], end=hours[-1], root=state.processed_root, target=target)
+    if stored.empty:
+        return None
+
+    stored = latest_run(stored).reindex(hours)
+    if stored["forecast_value"].isna().any():
+        return None
+
+    stamps = pd.DatetimeIndex(stored.index)
+    local_hours = stamps.tz_convert(LOCAL_TZ).hour
+
+    return ForecastResponse(
+        delivery_date=delivery_date,
+        target=target.name,
+        unit=str(stored["unit"].iloc[0]),
+        source="stored",
+        forecast_origin=pd.Timestamp(stored["forecast_origin"].iloc[0]).to_pydatetime(),
+        model_name=str(stored["model_name"].iloc[0]),
+        model_version=str(stored["model_version"].iloc[0]),
+        generated_at=pd.Timestamp(stored["generated_at"].iloc[0]).to_pydatetime(),
+        hours=[
+            HourlyForecast(
+                timestamp=timestamp.to_pydatetime(),
+                local_hour=int(local_hour),
+                forecast_value=float(value),
+            )
+            for timestamp, local_hour, value in zip(
+                stamps, local_hours, stored["forecast_value"], strict=True
             )
         ],
     )

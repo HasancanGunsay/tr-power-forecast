@@ -107,13 +107,12 @@ Adding a third target is a row in `targets.py`, a model, and a line in the orche
 The scheduled run now does both targets and exits zero only if **every** target's forecast
 reached the store. A day where price was bid and load was not is not a successful day.
 
-**The service still cannot forecast tomorrow, and that is unchanged rather than
-introduced.** It reads the panel from disk, and tomorrow's weather is not in it; the daily
-job fetches the live day-ahead forecast and the service does not. Both targets fail
-identically on tomorrow and both answer for a past day. Closing that means putting a
-network call in the request path, which is a real trade — latency, an external dependency
-mid-request, a new error mode — and belongs in its own decision rather than slipped in
-here.
+**The service could not forecast tomorrow when this was written.** It reads the panel
+from disk, and tomorrow's weather is not in it; the daily job fetches the live day-ahead
+forecast and the service did not. Both targets failed identically on tomorrow and both
+answered for a past day. Closing it meant weighing a network call in the request path
+against reading what the job already stored — resolved in
+[ADR 0015](0015-price-bias-and-serving-from-the-store.md) in favour of the store.
 
 `fetch_live` for supply weather exists because running the job revealed it was missing.
 Everything passed, the model was trained and saved, and the first real invocation refused

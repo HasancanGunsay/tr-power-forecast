@@ -82,6 +82,10 @@ def client(tmp_path) -> TestClient:
         models={"load": "test-model"},
         model_directory=tmp_path,
         panel_loader=synthetic_panel,
+        # Point the store fallback at a directory that does not exist yet, so a
+        # test of the refusal path cannot accidentally read the developer's own
+        # forecasts and pass for the wrong reason.
+        processed_root=tmp_path / "processed",
         # The model was fitted seconds ago by this very process, so the versions
         # match by construction and the check has nothing to catch. Left on
         # because turning it off in tests would mean the production default is
@@ -205,3 +209,117 @@ def test_the_panel_is_cached_and_then_refreshed(tmp_path):
         client.app.state.service.panel.ttl_seconds = 0
         client.get("/health")
         assert reads == 2
+
+
+# --------------------------------------------------------------------------- #
+# Serving a day the panel cannot answer
+# --------------------------------------------------------------------------- #
+#
+# Tomorrow is the only day anyone actually wants, and the panel never holds its
+# weather — so `forecast_day` refuses it. The scheduled job fetches that weather
+# once, before the bid deadline, and writes the result down; the service reads it
+# back rather than refetching inside the request.
+
+FUTURE_DAY = "2026-12-25"  # far outside the synthetic panel
+
+
+def _app_with_store(tmp_path, processed_root):
+    """The same app the `client` fixture builds, pointed at a given store."""
+    panel = synthetic_panel()
+    spec = FeatureSpec(include_weather=True, include_holidays=True)
+
+    from powerforecast.features.build import build_design_matrix, usable_rows
+
+    features, target = build_design_matrix(panel, spec)
+    usable = usable_rows(features, target)
+    estimator = make_ridge().fit(features.loc[usable], target.loc[usable])
+    save_model(
+        estimator, name="test-model", features=features.loc[usable], spec=spec, directory=tmp_path
+    )
+    return create_app(
+        models={"load": "test-model"},
+        model_directory=tmp_path,
+        panel_loader=synthetic_panel,
+        processed_root=processed_root,
+    )
+
+
+def _store_a_day(delivery_date: str, root, *, base: float = 41_000.0, hours_to_keep: int = 24):
+    """Write one delivery day into the forecast store, optionally short."""
+    from datetime import UTC, date, datetime
+
+    from powerforecast.forecasts.day import DayForecast
+    from powerforecast.forecasts.store import write_forecasts
+    from powerforecast.targets import LOAD
+
+    start = pd.Timestamp(delivery_date, tz="Europe/Istanbul")
+    hours = pd.DatetimeIndex(
+        pd.date_range(start, start + pd.DateOffset(days=1), freq="h", inclusive="left")
+    ).tz_convert("UTC")[:hours_to_keep]
+
+    frame = DayForecast(
+        delivery_date=date.fromisoformat(delivery_date),
+        forecast_origin=hours[0] - pd.Timedelta(hours=13),
+        model_name="load-lightgbm",
+        model_version="20260907T000000Z",
+        generated_at=datetime(2026, 9, 7, 8, 30, tzinfo=UTC),
+        values=pd.Series(base, index=hours, dtype="float64"),
+        bias_offset=pd.Series(0.0, index=hours, dtype="float64"),
+        target=LOAD,
+    ).to_frame()
+    write_forecasts(frame, root=root, target=LOAD)
+
+
+def test_a_day_the_panel_cannot_answer_is_served_from_the_store(tmp_path):
+    """The number returned is the one that was available at bid time.
+
+    That is the argument for reading the store rather than recomputing: a fresh
+    computation would use data that arrived after bids closed, which is a
+    different — and unauditable — number.
+    """
+    processed = tmp_path / "processed"
+    _store_a_day(FUTURE_DAY, processed)
+
+    with TestClient(_app_with_store(tmp_path, processed)) as client:
+        response = client.get("/forecast", params={"date": FUTURE_DAY})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "stored"
+    assert len(body["hours"]) == 24
+    assert body["model_version"] == "20260907T000000Z"
+    assert body["unit"] == "MWh"
+
+
+def test_a_computed_day_says_so(client):
+    """The two sources are not interchangeable, so the response distinguishes them."""
+    body = client.get("/forecast", params={"date": SERVED_DAY}).json()
+
+    assert body["source"] == "computed"
+
+
+def test_an_incomplete_stored_day_is_refused_rather_than_served_short(tmp_path):
+    """A day short one hour is a position nobody bid.
+
+    Returning 23 hours would be worse than refusing: nothing in a JSON list tells
+    the caller that an hour is missing from it.
+    """
+    processed = tmp_path / "processed"
+    _store_a_day(FUTURE_DAY, processed, hours_to_keep=23)
+
+    with TestClient(_app_with_store(tmp_path, processed)) as client:
+        response = client.get("/forecast", params={"date": FUTURE_DAY})
+
+    assert response.status_code == 422
+
+
+def test_the_refusal_names_both_attempts(client):
+    """Otherwise the message sends the reader to fix the panel.
+
+    When the real cause is that the scheduled job has not run, a refusal that
+    only mentions missing features points at the wrong thing entirely.
+    """
+    response = client.get("/forecast", params={"date": FUTURE_DAY})
+
+    assert response.status_code == 422
+    assert "stored_forecast" in response.json()["detail"]

@@ -31,6 +31,7 @@ history of a mistake is part of what makes the log useful.
 | [0012](0012-price-baseline-and-rejected-features.md) | Price modelling: the baseline, the window, and two rejected features | Accepted |
 | [0013](0013-supply-side-weather.md) | Supply-side weather, and the generation schedule that could not be used | Accepted |
 | [0014](0014-serving-two-targets.md) | Serving two targets without forking the pipeline | Accepted |
+| [0015](0015-price-bias-and-serving-from-the-store.md) | No bias correction on price, and a service that reads the store | Accepted |
 
 ## Template
 

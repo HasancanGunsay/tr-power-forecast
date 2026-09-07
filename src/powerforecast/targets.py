@@ -53,6 +53,17 @@ class Target:
     naive_season_hours: int
     """Lag used as the fallback control, and as the baseline in reporting."""
 
+    correct_bias: bool
+    """Whether the deployed forecast applies the rolling bias correction.
+
+    Measured per target, never inherited. On load it is worth -6.3% of MAE on a
+    freshly retrained model (ADR 0010). On price the same machinery is worth
+    -0.4% at best and **+2.5% worse** in the configuration load settled on, so
+    it is off (ADR 0015). The condition is not merely weaker on price, it is
+    inverted: the correction pays only on a stale model, and a stale price model
+    should be retrained rather than patched.
+    """
+
     include_supply_weather: bool
     """Whether the deployed model gets irradiance and wind at the generators.
 
@@ -74,6 +85,7 @@ LOAD = Target(
     unit="MWh",
     plan_column="load_plan_mwh",
     naive_season_hours=168,
+    correct_bias=True,
     include_supply_weather=False,
     mape_floor=1.0,
 )
@@ -86,6 +98,7 @@ PRICE = Target(
     # fact about the market, not a gap waiting to be filled by more ingestion.
     plan_column=None,
     naive_season_hours=168,
+    correct_bias=False,
     include_supply_weather=True,
     mape_floor=100.0,
 )

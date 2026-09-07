@@ -133,7 +133,7 @@ def forecast_day(
     delivery_date: date,
     *,
     generated_at: datetime | None = None,
-    correct_bias: bool = True,
+    correct_bias: bool | None = None,
     forecasts_root: Path | None = None,
 ) -> DayForecast:
     """Predict every hour of one delivery day, or refuse.
@@ -144,9 +144,13 @@ def forecast_day(
         panel: Observed history. Extended internally to cover the delivery day.
         delivery_date: Local calendar date to forecast.
         generated_at: Injectable clock, so a test does not depend on when it runs.
-        correct_bias: Apply the rolling bias correction. On by default; it is
-            worth 6.3% of MAE when the model is being retrained, and the guard
-            inside `delivery_offsets` refuses it when the model is stale.
+        correct_bias: Apply the rolling bias correction. `None` means "ask the
+            target", which is the right default because the answer differs by
+            target and was measured separately for each. On load it is worth
+            -6.3% of MAE on a retrained model (ADR 0010); on price the same
+            machinery is worth -0.4% at best and +2.5% *worse* in load's own
+            configuration, so it is off there (ADR 0015). Pass a bool only to
+            override deliberately, as an experiment does.
         forecasts_root: Where past forecasts live, for the error history.
 
     Raises:
@@ -183,11 +187,22 @@ def forecast_day(
     origin = pd.Timestamp(forecast_origins(hours).iloc[0])
     raw = model.predict(day.loc[complete])
 
-    offsets, reason = (
-        delivery_offsets(card, panel, origin, root=forecasts_root, target=target)
-        if correct_bias
-        else (BiasOffsets(method="none", reason="correction disabled by the caller"), "disabled")
-    )
+    # Asking the target rather than defaulting to True. The correction's value
+    # was measured separately for each and the answers disagree - and not only
+    # in size: on load it pays on a fresh model and hurts on a stale one, while
+    # on price that is inverted. Inheriting load's setting was worth +2.5% of
+    # price MAE until it was measured.
+    apply_correction = target.correct_bias if correct_bias is None else correct_bias
+
+    if apply_correction:
+        offsets, reason = delivery_offsets(card, panel, origin, root=forecasts_root, target=target)
+    else:
+        why = (
+            "correction disabled by the caller"
+            if correct_bias is False
+            else f"no bias correction is configured for {target.name}"
+        )
+        offsets, reason = BiasOffsets(method="none", reason=why), "disabled"
     applied = offsets.offsets_for(pd.DatetimeIndex(complete))
 
     return DayForecast(
