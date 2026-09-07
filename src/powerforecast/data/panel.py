@@ -25,12 +25,18 @@ LOCAL_TZ = "Europe/Istanbul"
 
 WEATHER_COLUMNS = ("temperature_c", "hdd", "cdd")
 
+# Conditions at the generators rather than at the consumers. Kept as its own
+# tuple because the two datasets have different site lists and are backfilled
+# by different scripts.
+SUPPLY_WEATHER_COLUMNS = ("solar_index", "wind_index")
+
 
 def load_panel(
     specs: tuple[SeriesSpec, ...] = ALL_SERIES,
     *,
     root: Path | None = None,
     with_weather: bool = True,
+    with_supply_weather: bool = True,
 ) -> pd.DataFrame:
     """Load every series into a single hourly frame indexed in UTC.
 
@@ -63,6 +69,9 @@ def load_panel(
     if with_weather:
         panel = _join_weather(panel, root=root)
 
+    if with_supply_weather:
+        panel = _join_supply_weather(panel, root=root)
+
     return panel
 
 
@@ -81,6 +90,23 @@ def _join_weather(panel: pd.DataFrame, *, root: Path | None) -> pd.DataFrame:
         return panel
 
     available = [column for column in WEATHER_COLUMNS if column in stored.columns]
+    return panel.join(stored[available])
+
+
+def _join_supply_weather(panel: pd.DataFrame, *, root: Path | None) -> pd.DataFrame:
+    """Attach the solar and wind indices if they have been backfilled.
+
+    Tolerates absence for the same reason `_join_weather` does, and it matters
+    more here: this dataset was added late, so any clone of the repository has
+    the electricity series long before it has these columns.
+    """
+    stored = read_monthly("supply_weather", root=root)
+    if stored.empty:
+        return panel
+
+    available = [column for column in SUPPLY_WEATHER_COLUMNS if column in stored.columns]
+    if not available:
+        return panel
     return panel.join(stored[available])
 
 

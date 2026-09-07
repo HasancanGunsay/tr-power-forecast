@@ -46,6 +46,7 @@ class FeatureSpec:
     origin_offsets: tuple[int, ...] = (0, 24)
     include_trend: bool = False
     include_weather: bool = True
+    include_supply_weather: bool = False
     include_holidays: bool = True
     include_load_plan: bool = False
     last_observed_hour: int = LAST_OBSERVED_HOUR
@@ -117,6 +118,22 @@ def build_design_matrix(
         # single worst leak available in this project — it would look excellent
         # in backtest and collapse in production.
         for column in ("temperature_c", "hdd", "cdd"):
+            if column in panel.columns:
+                columns.append(panel[column])
+
+    if spec.include_supply_weather:
+        # Irradiance and wind at the generating regions. Safe for the same
+        # reason temperature is: these are the values that were being *forecast*
+        # for the delivery hour on D-1, so they were on the bidder's desk.
+        #
+        # Off by default. They are a supply signal and the load target is a
+        # demand quantity, so switching them on for load would be adding columns
+        # with no mechanism behind them; the price target is where they belong.
+        #
+        # This is emphatically not the same as using KGÜP or EAK, which are
+        # submitted at 14:00-15:30 on D-1 — after the 12:30 deadline, and
+        # downstream of the market clearing. See `data.supply_weather`.
+        for column in ("solar_index", "wind_index"):
             if column in panel.columns:
                 columns.append(panel[column])
 
