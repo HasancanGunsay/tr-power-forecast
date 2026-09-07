@@ -150,11 +150,39 @@ def read_forecasts(
     if not files:
         return _empty()
 
-    frame = pd.concat([pd.read_parquet(path) for path in files]).sort_index()
+    # Normalise each file to the current schema **before** concatenating.
+    #
+    # Doing it afterwards was a bug, and one that only appeared once a target
+    # held both an old and a new file: the concatenation carried `forecast_mwh`
+    # from the old and `forecast_value` from the new, and renaming then produced
+    # two columns with the same name. `frame["forecast_value"]` returned a
+    # DataFrame, and the next `.isna().any()` raised somewhere else entirely.
+    # Found by running the service, not by the tests, which had only ever seen
+    # one generation at a time.
+    frame = pd.concat([_normalise(pd.read_parquet(path), target) for path in files]).sort_index()
 
-    # Two generations of older files are tolerated on read, both by filling in
-    # what they could not have carried. A reader that had to handle three shapes
-    # would grow the same three branches in every caller.
+    if start is not None:
+        frame = frame[frame.index >= pd.Timestamp(start)]
+    if end is not None:
+        frame = frame[frame.index <= pd.Timestamp(end)]
+    if model_name is not None:
+        frame = frame[frame["model_name"] == model_name]
+    if model_version is not None:
+        frame = frame[frame["model_version"] == model_version]
+
+    return frame
+
+
+def _normalise(frame: pd.DataFrame, target: Target | str | None) -> pd.DataFrame:
+    """Bring one stored file up to the current schema.
+
+    Two older generations are tolerated on read, both by filling in what they
+    could not have carried. A reader that had to handle three shapes would grow
+    the same three branches at every call site.
+
+    Applied per file rather than to the concatenation, because two generations
+    of file under one target would otherwise collide on the renamed column.
+    """
     frame = frame.rename(columns=LEGACY_COLUMNS)
 
     # Files written before the correction existed have no offset column. Zero is
@@ -167,18 +195,7 @@ def read_forecasts(
     if "unit" not in frame.columns:
         frame["unit"] = resolve(target).unit
 
-    frame = frame[list(FORECAST_COLUMNS)]
-
-    if start is not None:
-        frame = frame[frame.index >= pd.Timestamp(start)]
-    if end is not None:
-        frame = frame[frame.index <= pd.Timestamp(end)]
-    if model_name is not None:
-        frame = frame[frame["model_name"] == model_name]
-    if model_version is not None:
-        frame = frame[frame["model_version"] == model_version]
-
-    return frame
+    return frame[list(FORECAST_COLUMNS)]
 
 
 def latest_run(frame: pd.DataFrame) -> pd.DataFrame:

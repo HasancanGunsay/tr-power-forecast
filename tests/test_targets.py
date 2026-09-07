@@ -261,3 +261,34 @@ def test_a_target_without_correction_reports_why_rather_than_going_quiet() -> No
     )
 
     assert "price" in offsets.reason
+
+
+def test_two_generations_of_file_under_one_target_read_cleanly(tmp_path) -> None:
+    """A legacy month and a current month in the same directory.
+
+    Normalising after the concatenation instead of before was a real bug: the
+    combined frame carried `forecast_mwh` from the old file and `forecast_value`
+    from the new, so renaming produced two columns with one name.
+    `frame["forecast_value"]` then returned a DataFrame and the failure surfaced
+    somewhere else entirely, as a truth-value error on a Series.
+
+    The tests missed it because each had only ever seen one generation at a time.
+    Running the service found it.
+    """
+    directory = forecasts_root(tmp_path, target=LOAD)
+    directory.mkdir(parents=True)
+
+    legacy = _day(LOAD, base=40_000.0).rename(
+        columns={"forecast_value": "forecast_mwh", "bias_offset": "bias_offset_mwh"}
+    )
+    legacy.drop(columns=["unit"]).to_parquet(directory / "2026-08.parquet", index=True)
+
+    current = _day(LOAD, base=41_000.0)
+    current.to_parquet(directory / "2026-09.parquet", index=True)
+
+    stored = read_forecasts(root=tmp_path, target=LOAD)
+
+    assert list(stored.columns) == list(stored.columns.unique()), "duplicate columns"
+    assert isinstance(stored["forecast_value"], pd.Series)
+    assert set(stored["unit"]) == {"MWh"}
+    assert len(stored) == 48
